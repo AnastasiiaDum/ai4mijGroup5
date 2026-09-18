@@ -6,6 +6,7 @@ ROOT = Path("data/segthor_part1/data/segthor_part1/train")
 
 for patient_dir in sorted(ROOT.glob("Patient_*")):
 
+    # Get file
     patient = patient_dir.name
     ct_path = patient_dir / f"{patient}.nii.gz"
     gt_path = patient_dir / "GT.nii.gz"
@@ -16,14 +17,11 @@ for patient_dir in sorted(ROOT.glob("Patient_*")):
     ct_data = ct.get_fdata()
     gt_data = gt.get_fdata().astype(np.int16)
 
+    # EDA
     print(f"\n{patient}")
     print("CT shape:", ct_data.shape)
     print("CT spacing:", ct.header.get_zooms()[:3])
-    print(
-        "CT range:",
-        float(ct_data.min()),
-        float(ct_data.max())
-    )
+    print("CT range:", float(ct_data.min()), float(ct_data.max()))
 
     labels, counts = np.unique(gt_data, return_counts=True)
 
