@@ -19,7 +19,7 @@ def propose_split(gt, spacing, prominence_mm=2.0):
     """Uses merged GT only. Group watershed basins by maximum interior depth.
 
     Hypothesis: narrower basins are label 1, wider basins label 4.
-    This class assignment is an assumption, not an anatomical guarantee.
+   This assignment is an assumption.
     """
     mask = gt == 1
     points = np.argwhere(mask)
