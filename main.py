@@ -95,7 +95,7 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
 
     # Dataset part
     B: int = datasets_params[args.dataset]['B']
-    root_dir = Path("data") / args.dataset
+    root_dir = args.data_dir if args.data_dir is not None else Path("data") / args.dataset
 
 
 
@@ -246,6 +246,13 @@ def main():
                         help="Keep only a fraction (10 samples) of the datasets, "
                              "to test the logics around epochs and logging easily.")
 
+    parser.add_argument(
+    "--data_dir",
+    type=Path,
+    default=None,
+    help="Folder containing the train and val image folders."
+    )
+    
     args = parser.parse_args()
 
     pprint(args)
