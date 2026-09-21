@@ -1,0 +1,4 @@
+patient,baseline_min,baseline_max,candidate_low,candidate_high,percent_below_low,percent_above_high
+Patient_01,-1000.0,3071.0,-1000.0,245.0,0.0,0.9983862331340406
+Patient_02,-1000.0,26613.0,-1000.0,367.0,0.0,0.9967152665301067
+Patient_03,-1000.0,25292.0,-1000.0,276.0,0.0,0.9991211145102572
