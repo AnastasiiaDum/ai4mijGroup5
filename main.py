@@ -52,12 +52,23 @@ from utils import (Dcm,
 
 from losses import (CrossEntropy)
 
+from UNet2_5D import UNet25D
+from dataset import SliceDataset, SliceDataset25D
+from losses import CrossEntropy, DiceCELoss
+
+N_NEIGHBORS = 2                      # 5-slice input; try 1 (3 slices) or 3 (7 slices)
+
+
+
 datasets_params: dict[str, dict[str, Any]] = {}
 # K for the number of classes
 # Avoids the classes with C (often used for the number of Channel)
 datasets_params["TOY2"] = {'K': 2, 'net': shallowCNN, 'B': 2, 'kernels': 8, 'factor': 2}
 datasets_params["SEGTHOR"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
 datasets_params["SEGTHOR_CLEAN"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
+
+# datasets_params["SEGTHOR"] = {'K': 5, 'net': UNet25D, 'B': 8}
+datasets_params["SEGTHOR"] = {'K': 5, 'net': UNet25D, 'B': 8, 'use_25d': True}
 
 def img_transform(img):
         img = img.convert('L')
@@ -77,6 +88,52 @@ def gt_transform(K, img):
         img = class2one_hot(img, K=K)
         return img[0]
 
+# def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
+#     # Networks and scheduler
+#     gpu: bool = args.gpu and torch.cuda.is_available()
+#     device = torch.device("cuda") if gpu else torch.device("cpu")
+#     print(f">> Picked {device} to run experiments")
+
+    # K: int = datasets_params[args.dataset]['K']
+    # kernels: int = datasets_params[args.dataset]['kernels'] if 'kernels' in datasets_params[args.dataset] else 8
+    # factor: int = datasets_params[args.dataset]['factor'] if 'factor' in datasets_params[args.dataset] else 2
+    # net = datasets_params[args.dataset]['net'](1, K, kernels=kernels, factor=factor)
+    # net.init_weights()
+    # net.to(device)
+
+    # lr = 0.0005
+    # optimizer = torch.optim.Adam(net.parameters(), lr=lr, betas=(0.9, 0.999))
+
+    # # Dataset part
+    # B: int = datasets_params[args.dataset]['B']
+    # root_dir = args.data_dir if args.data_dir is not None else Path("data") / args.dataset
+
+
+
+    # train_set = SliceDataset('train',
+    #                          root_dir,
+    #                          img_transform=img_transform,
+    #                          gt_transform= partial(gt_transform, K),
+    #                          debug=args.debug)
+    # train_loader = DataLoader(train_set,
+    #                           batch_size=B,
+    #                           num_workers=5,
+    #                           shuffle=True)
+
+    # val_set = SliceDataset('val',
+    #                        root_dir,
+    #                        img_transform=img_transform,
+    #                        gt_transform=partial(gt_transform, K),
+    #                        debug=args.debug)
+    # val_loader = DataLoader(val_set,
+    #                         batch_size=B,
+    #                         num_workers=5,
+    #                         shuffle=False)
+
+    # args.dest.mkdir(parents=True, exist_ok=True)
+
+    # return (net, optimizer, device, train_loader, val_loader, K)
+
 def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     # Networks and scheduler
     gpu: bool = args.gpu and torch.cuda.is_available()
@@ -84,9 +141,15 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     print(f">> Picked {device} to run experiments")
 
     K: int = datasets_params[args.dataset]['K']
-    kernels: int = datasets_params[args.dataset]['kernels'] if 'kernels' in datasets_params[args.dataset] else 8
-    factor: int = datasets_params[args.dataset]['factor'] if 'factor' in datasets_params[args.dataset] else 2
-    net = datasets_params[args.dataset]['net'](1, K, kernels=kernels, factor=factor)
+    use_25d: bool = datasets_params[args.dataset].get('use_25d', False)
+
+    if use_25d:
+        in_ch: int = 2 * N_NEIGHBORS + 1
+        net = datasets_params[args.dataset]['net'](in_ch, K)
+    else:
+        kernels: int = datasets_params[args.dataset].get('kernels', 8)
+        factor: int = datasets_params[args.dataset].get('factor', 2)
+        net = datasets_params[args.dataset]['net'](1, K, kernels=kernels, factor=factor)
     net.init_weights()
     net.to(device)
 
@@ -97,23 +160,26 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     B: int = datasets_params[args.dataset]['B']
     root_dir = args.data_dir if args.data_dir is not None else Path("data") / args.dataset
 
+    if use_25d:
+        make_set = partial(SliceDataset25D, n_neighbors=N_NEIGHBORS)
+    else:
+        make_set = SliceDataset
 
-
-    train_set = SliceDataset('train',
-                             root_dir,
-                             img_transform=img_transform,
-                             gt_transform= partial(gt_transform, K),
-                             debug=args.debug)
+    train_set = make_set('train',
+                         root_dir,
+                         img_transform=img_transform,
+                         gt_transform=partial(gt_transform, K),
+                         debug=args.debug)
     train_loader = DataLoader(train_set,
                               batch_size=B,
                               num_workers=5,
                               shuffle=True)
 
-    val_set = SliceDataset('val',
-                           root_dir,
-                           img_transform=img_transform,
-                           gt_transform=partial(gt_transform, K),
-                           debug=args.debug)
+    val_set = make_set('val',
+                       root_dir,
+                       img_transform=img_transform,
+                       gt_transform=partial(gt_transform, K),
+                       debug=args.debug)
     val_loader = DataLoader(val_set,
                             batch_size=B,
                             num_workers=5,
@@ -129,7 +195,8 @@ def runTraining(args):
     net, optimizer, device, train_loader, val_loader, K = setup(args)
 
     if args.mode == "full":
-        loss_fn = CrossEntropy(idk=list(range(K)))  # Supervise both background and foreground
+        loss_fn = DiceCELoss(K)
+        # loss_fn = CrossEntropy(idk=list(range(K)))  # Supervise both background and foreground
     elif args.mode in ["partial"] and args.dataset == 'SEGTHOR':
         loss_fn = CrossEntropy(idk=[0, 1, 3, 4])  # Do not supervise the heart (class 2)
     else:
