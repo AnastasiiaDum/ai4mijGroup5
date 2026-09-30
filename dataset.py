@@ -28,6 +28,9 @@ from typing import Callable, Union
 from torch import Tensor
 from PIL import Image
 from torch.utils.data import Dataset
+import torch
+
+import re
 
 
 def make_dataset(root, subset) -> list[tuple[Path, Path | None]]:
@@ -87,3 +90,57 @@ class SliceDataset(Dataset):
             data_dict["gts"] = gt
 
         return data_dict
+
+class SliceDataset25D(Dataset):
+    """
+    Returns a stack of (2*n_neighbors+1) adjacent slices from the same patient
+    as the input, and the ground truth of the center slice only.
+    Edge slices are handled by repeating the first/last slice.
+    Expects filenames like Patient_01_0042.png.
+    """
+    _pat = re.compile(r"^(.*)_(\d+)$")
+
+    def __init__(self, subset, root_dir, img_transform=None, gt_transform=None,
+                 debug=False, n_neighbors=2):
+        self.img_transform = img_transform
+        self.gt_transform = gt_transform
+        root = Path(root_dir) / subset
+        imgs = sorted((root / "img").glob("*.png"))
+        gts = sorted((root / "gt").glob("*.png"))
+        assert len(imgs) == len(gts) > 0
+
+        # group slices by patient, ordered by slice index
+        groups = {}
+        for p in imgs:
+            m = self._pat.match(p.stem)
+            assert m, f"Unexpected filename: {p.name}"
+            groups.setdefault(m.group(1), []).append((int(m.group(2)), p))
+        pos = {}  # path -> (patient, position in patient's sorted list)
+        for pid, lst in groups.items():
+            lst.sort(key=lambda t: t[0])
+            groups[pid] = [p for _, p in lst]
+            for i, p in enumerate(groups[pid]):
+                pos[p] = (pid, i)
+
+        self.samples = []  # (list of neighbour paths, center gt path)
+        for img_p, gt_p in zip(imgs, gts):
+            pid, i = pos[img_p]
+            g = groups[pid]
+            neigh = [g[min(max(i + o, 0), len(g) - 1)]
+                     for o in range(-n_neighbors, n_neighbors + 1)]
+            self.samples.append((neigh, gt_p))
+
+        if debug:
+            self.samples = self.samples[:10]
+        print(f"> Created {subset} 2.5D dataset with {len(self.samples)} samples "
+              f"({2 * n_neighbors + 1} slices each)")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, index):
+        neigh, gt_path = self.samples[index]
+        stack = torch.cat([self.img_transform(Image.open(p)) for p in neigh], dim=0)
+        gt = self.gt_transform(Image.open(gt_path))
+        center = neigh[len(neigh) // 2]
+        return {"images": stack, "gts": gt, "stems": center.stem}
