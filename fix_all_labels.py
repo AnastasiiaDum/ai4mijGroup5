@@ -269,9 +269,7 @@ def process_patient(
         np.unique(predicted).astype(int).tolist()
     )
 
-    # ---------------------------------------------------------
     # Optional Patient 07 reference comparison.
-    # ---------------------------------------------------------
 
     reference = None
 
@@ -334,9 +332,7 @@ def process_patient(
             f"{report['different_voxels']}"
         )
 
-    # ---------------------------------------------------------
     # Create output patient directory.
-    # ---------------------------------------------------------
 
     patient_output = output_dir / patient_name
 
@@ -359,9 +355,8 @@ def process_patient(
             patient_output / "GT2.nii.gz"
         )
 
-    # ---------------------------------------------------------
     # Save corrected GT.
-    # ---------------------------------------------------------
+
 
     header = image.header.copy()
     header.set_data_dtype(np.uint8)
@@ -397,9 +392,7 @@ def process_patient(
         str(corrected_gt)
     )
 
-    # ---------------------------------------------------------
     # Reload and verify corrected file.
-    # ---------------------------------------------------------
 
     reloaded = nib.load(
         str(corrected_gt)
@@ -433,9 +426,7 @@ def process_patient(
             "Corrected GT contains invalid labels."
         )
 
-    # ---------------------------------------------------------
     # Save report.
-    # ---------------------------------------------------------
 
     report["output_gt"] = str(
         corrected_gt
@@ -577,10 +568,8 @@ def main():
                 "patient": patient_dir.name,
                 "error": str(exc)
             })
-
-    # ---------------------------------------------------------
+            
     # Overall report.
-    # ---------------------------------------------------------
 
     overall_report = {
         "source_dir": str(
