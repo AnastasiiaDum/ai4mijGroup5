@@ -50,6 +50,20 @@ def norm_arr(img: np.ndarray) -> np.ndarray:
 
     return res.astype(np.uint8)
 
+def norm_arr_percentile(img: np.ndarray) -> np.ndarray:
+    """Clip extreme intensities, then scale the CT to 0–255."""
+    image = img.astype(np.float32)
+
+    low, high = np.percentile(image, [1, 99])
+
+    if high <= low:
+        raise ValueError("Cannot normalize: clipping limits are equal.")
+
+    clipped = np.clip(image, low, high)
+    normalized = (clipped - low) / (high - low)
+
+    return (normalized * 255).clip(0, 255).astype(np.uint8)
+
 
 def sanity_ct(ct, x, y, z, dx, dy, dz) -> bool:
     assert ct.dtype in [np.int16, np.int32], ct.dtype
@@ -80,8 +94,14 @@ def sanity_gt(gt, ct) -> bool:
 resize_: Callable = partial(resize, mode="constant", preserve_range=True, anti_aliasing=False)
 
 
-def slice_patient(id_: str, dest_path: Path, source_path: Path, shape: tuple[int, int],
-                  test_mode: bool = False) -> tuple[float, float, float]:
+def slice_patient(
+    id_: str,
+    dest_path: Path,
+    source_path: Path,
+    shape: tuple[int, int],
+    test_mode: bool = False,
+    intensity_mode: str = "baseline"
+) -> tuple[float, float, float]:
     id_path: Path = source_path / ("train" if not test_mode else "test") / id_
 
     ct_path: Path = (id_path / f"{id_}.nii.gz") if not test_mode else (source_path / "test" / f"{id_}.nii.gz")
@@ -103,7 +123,10 @@ def slice_patient(id_: str, dest_path: Path, source_path: Path, shape: tuple[int
     else:
         gt = np.zeros_like(ct, dtype=np.uint8)
 
-    norm_ct: np.ndarray = norm_arr(ct)
+    if intensity_mode == "percentile":
+        norm_ct = norm_arr_percentile(ct)
+    else:
+        norm_ct = norm_arr(ct)
 
     to_slice_ct = norm_ct
     to_slice_gt = gt
@@ -136,7 +159,11 @@ def slice_patient(id_: str, dest_path: Path, source_path: Path, shape: tuple[int
 
 
 def get_splits(src_path: Path, retains: int, fold: int) -> tuple[list[str], list[str], list[str]]:
-    ids: list[str] = sorted(map_(lambda p: p.name, (src_path / 'train').glob('*')))
+    ids: list[str] = sorted(
+        p.name
+        for p in (src_path / "train").glob("Patient_*")
+        if p.is_dir()
+    )
     print(f"Founds {len(ids)} in the id list")
     print(ids[:10])
     assert len(ids) > retains
@@ -176,11 +203,14 @@ def main(args: argparse.Namespace):
         dest_mode: Path = dest_path / mode
         print(f"Slicing {len(split_ids)} pairs to {dest_mode}")
 
-        pfun: Callable = partial(slice_patient,
-                                 dest_path=dest_mode,
-                                 source_path=src_path,
-                                 shape=tuple(args.shape),
-                                 test_mode=mode == 'test')
+        pfun: Callable = partial(
+            slice_patient,
+            dest_path=dest_mode,
+            source_path=src_path,
+            shape=tuple(args.shape),
+            test_mode=mode == "test",
+            intensity_mode=args.intensity_mode
+        )
         resolutions: list[tuple[float, float, float]]
         iterator = tqdm_(split_ids)
         match args.process:
@@ -210,6 +240,13 @@ def get_args() -> argparse.Namespace:
     parser.add_argument('--fold', type=int, default=0)
     parser.add_argument('--process', '-p', type=int, default=1,
                         help="The number of cores to use for processing")
+    parser.add_argument(
+        "--intensity_mode",
+        choices=["baseline", "percentile"],
+        default="baseline",
+        help="Choose original scaling or percentile clipping."
+    )
+
     args = parser.parse_args()
     random.seed(args.seed)
 

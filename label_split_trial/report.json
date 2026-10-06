@@ -1,0 +1,46 @@
+{
+  "prominence_mm": 2.0,
+  "cutoff_mm": 10.894011105192906,
+  "basins": [
+    {
+      "basin": 1,
+      "voxels": 23993,
+      "maximum_depth_mm": 13.817386367024156,
+      "assigned_label": 4
+    },
+    {
+      "basin": 2,
+      "voxels": 25349,
+      "maximum_depth_mm": 9.013746148461596,
+      "assigned_label": 1
+    },
+    {
+      "basin": 3,
+      "voxels": 65887,
+      "maximum_depth_mm": 12.774276061924214,
+      "assigned_label": 4
+    }
+  ],
+  "combined_region_preserved": true,
+  "other_labels_unchanged": true,
+  "status": "EXPERIMENTAL: review before any training use",
+  "source_sha256": "b183f0c91f2ab9b96d469ae9cf2a03885b80ab2db5b903571b71d65609aad75f",
+  "versions": {
+    "numpy": "2.3.5",
+    "scipy": "1.16.3",
+    "scikit-image": "0.26.0",
+    "nibabel": "5.4.2"
+  },
+  "reference_sha256": "147c9e902305ef53fe7d427ec192edd77553ed5b564e2576ce37b478c17b2997",
+  "reference_union_matches": true,
+  "dice_original": {
+    "1": 0.360919474829661,
+    "4": 0.0
+  },
+  "dice_candidate": {
+    "1": 0.9980678995307756,
+    "4": 0.9994547558641563
+  },
+  "different_voxels": 98,
+  "evaluation_note": "Patient 07 development check, not independent validation or ENet performance."
+}
