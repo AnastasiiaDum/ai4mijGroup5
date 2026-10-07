@@ -29,13 +29,15 @@ from pathlib import Path
 from pprint import pprint
 from operator import itemgetter
 from shutil import copytree, rmtree
+import re
+import json
 
 import torch
 import numpy as np
 import torch.nn.functional as F
 from torch import nn, Tensor
 from torchvision import transforms
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, ConcatDataset, Subset
 
 from functools import partial 
 
@@ -52,7 +54,7 @@ from utils import (Dcm,
 
 from losses import (CrossEntropy)
 
-from UNet2_5D import UNet25D
+from UNet2_25D import UNet25D
 from dataset import SliceDataset, SliceDataset25D
 from losses import CrossEntropy, DiceCELoss
 
@@ -67,7 +69,6 @@ datasets_params["TOY2"] = {'K': 2, 'net': shallowCNN, 'B': 2, 'kernels': 8, 'fac
 datasets_params["SEGTHOR"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
 datasets_params["SEGTHOR_CLEAN"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
 
-# datasets_params["SEGTHOR"] = {'K': 5, 'net': UNet25D, 'B': 8}
 datasets_params["SEGTHOR"] = {'K': 5, 'net': UNet25D, 'B': 8, 'use_25d': True}
 
 def img_transform(img):
@@ -79,67 +80,50 @@ def img_transform(img):
 
 def gt_transform(K, img):
         img = np.array(img)[...]
-        # The idea is that the classes are mapped to {0, 255} for binary cases
-        # {0, 85, 170, 255} for 4 classes
-        # {0, 51, 102, 153, 204, 255} for 6 classes
-        # Very sketchy but that works here and that simplifies visualization
         img = img / (255 / (K - 1)) if K != 5 else img / 63  # max <= 1
         img = torch.tensor(img, dtype=torch.int64)[None, ...]  # Add one dimension to simulate batch
         img = class2one_hot(img, K=K)
         return img[0]
 
-# def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
-#     # Networks and scheduler
-#     gpu: bool = args.gpu and torch.cuda.is_available()
-#     device = torch.device("cuda") if gpu else torch.device("cpu")
-#     print(f">> Picked {device} to run experiments")
+# patient wise splitting cross validation
+PATIENT_RE = re.compile(r"(Patient_\d+)")
 
-    # K: int = datasets_params[args.dataset]['K']
-    # kernels: int = datasets_params[args.dataset]['kernels'] if 'kernels' in datasets_params[args.dataset] else 8
-    # factor: int = datasets_params[args.dataset]['factor'] if 'factor' in datasets_params[args.dataset] else 2
-    # net = datasets_params[args.dataset]['net'](1, K, kernels=kernels, factor=factor)
-    # net.init_weights()
-    # net.to(device)
-
-    # lr = 0.0005
-    # optimizer = torch.optim.Adam(net.parameters(), lr=lr, betas=(0.9, 0.999))
-
-    # # Dataset part
-    # B: int = datasets_params[args.dataset]['B']
-    # root_dir = args.data_dir if args.data_dir is not None else Path("data") / args.dataset
+def patient_id(stem: str) -> str:
+    m = PATIENT_RE.search(stem)
+    return m.group(1) if m else stem
 
 
+def get_stems(ds, root_dir: Path, split: str, debug: bool) -> list[str]:
+    stems = sorted(p.stem for p in (root_dir / split / "gt").glob("*.png"))
+    if debug:
+        stems = stems[:len(ds)]
+    assert len(stems) == len(ds), f"{split}: {len(stems)} files vs dataset length {len(ds)}"
+    return stems
 
-    # train_set = SliceDataset('train',
-    #                          root_dir,
-    #                          img_transform=img_transform,
-    #                          gt_transform= partial(gt_transform, K),
-    #                          debug=args.debug)
-    # train_loader = DataLoader(train_set,
-    #                           batch_size=B,
-    #                           num_workers=5,
-    #                           shuffle=True)
+def split_by_patient(stems: list[str], frac: float, seed: int) -> tuple[np.ndarray, np.ndarray]:
+    groups = np.array([patient_id(s) for s in stems])
+    patients = np.unique(groups)
+    rng = np.random.RandomState(seed)
+    rng.shuffle(patients)
+    n_held = max(1, int(round(frac * len(patients))))
+    if n_held >= len(patients):
+        raise ValueError(f"Cannot hold out {n_held} of {len(patients)} patients")
+    held = np.isin(groups, patients[:n_held])
+    return np.flatnonzero(~held), np.flatnonzero(held)
 
-    # val_set = SliceDataset('val',
-    #                        root_dir,
-    #                        img_transform=img_transform,
-    #                        gt_transform=partial(gt_transform, K),
-    #                        debug=args.debug)
-    # val_loader = DataLoader(val_set,
-    #                         batch_size=B,
-    #                         num_workers=5,
-    #                         shuffle=False)
 
-    # args.dest.mkdir(parents=True, exist_ok=True)
+def patient_folds(stems: list[str], n_folds: int, seed: int) -> list[np.ndarray]:
+    groups = np.array([patient_id(s) for s in stems])
+    patients = np.unique(groups)
+    if len(patients) < n_folds:
+        raise ValueError(f"{len(patients)} patients, cannot make {n_folds} folds")
+    rng = np.random.RandomState(seed)
+    rng.shuffle(patients)
+    fold_patients = np.array_split(patients, n_folds)
+    return [np.flatnonzero(np.isin(groups, fp)) for fp in fold_patients]
 
-    # return (net, optimizer, device, train_loader, val_loader, K)
 
-def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
-    # Networks and scheduler
-    gpu: bool = args.gpu and torch.cuda.is_available()
-    device = torch.device("cuda") if gpu else torch.device("cpu")
-    print(f">> Picked {device} to run experiments")
-
+def build_model(args, device) -> tuple[nn.Module, torch.optim.Optimizer]:
     K: int = datasets_params[args.dataset]['K']
     use_25d: bool = datasets_params[args.dataset].get('use_25d', False)
 
@@ -155,9 +139,12 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
 
     lr = 0.0005
     optimizer = torch.optim.Adam(net.parameters(), lr=lr, betas=(0.9, 0.999))
+    return net, optimizer
 
-    # Dataset part
-    B: int = datasets_params[args.dataset]['B']
+
+def build_datasets(args) -> tuple[dict[str, Any], dict[str, list[str]]]:
+    K: int = datasets_params[args.dataset]['K']
+    use_25d: bool = datasets_params[args.dataset].get('use_25d', False)
     root_dir = args.data_dir if args.data_dir is not None else Path("data") / args.dataset
 
     if use_25d:
@@ -165,38 +152,42 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     else:
         make_set = SliceDataset
 
-    train_set = make_set('train',
-                         root_dir,
-                         img_transform=img_transform,
-                         gt_transform=partial(gt_transform, K),
-                         debug=args.debug)
-    train_loader = DataLoader(train_set,
-                              batch_size=B,
-                              num_workers=5,
-                              shuffle=True)
+    sets: dict[str, Any] = {}
+    for split in ('train', 'val'):
+        sets[split] = make_set(split,
+                               root_dir,
+                               img_transform=img_transform,
+                               gt_transform=partial(gt_transform, K),
+                               debug=args.debug)
 
-    val_set = make_set('val',
-                       root_dir,
-                       img_transform=img_transform,
-                       gt_transform=partial(gt_transform, K),
-                       debug=args.debug)
-    val_loader = DataLoader(val_set,
-                            batch_size=B,
-                            num_workers=5,
-                            shuffle=False)
-
-    args.dest.mkdir(parents=True, exist_ok=True)
-
-    return (net, optimizer, device, train_loader, val_loader, K)
+    stems: dict[str, list[str]] = {}
+    stems = {s: get_stems(sets[s], root_dir, s, args.debug) for s in sets}
+    return sets, stems
 
 
-def runTraining(args):
-    print(f">>> Setting up to train on {args.dataset} with {args.mode}")
-    net, optimizer, device, train_loader, val_loader, K = setup(args)
+def make_loaders(args, train_ds, val_ds) -> tuple[DataLoader, DataLoader]:
+    B: int = datasets_params[args.dataset]['B']
+    train_loader = DataLoader(train_ds, batch_size=B, num_workers=5, shuffle=True)
+    val_loader = DataLoader(val_ds, batch_size=B, num_workers=5, shuffle=False)
+    return train_loader, val_loader
+
+@torch.no_grad()
+def evaluate(net, loader, device) -> np.ndarray:
+    net.eval()
+    dices = []
+    for data in loader:
+        img = data['images'].to(device)
+        gt = data['gts'].to(device)
+        probs = F.softmax(net(img), dim=1)
+        dices.append(dice_coef(probs2one_hot(probs), gt).cpu())
+    return torch.cat(dices).mean(dim=0).numpy()  # (K,)
+
+# training fold
+def train_one_fold(args, net, optimizer, device, train_loader, val_loader, K, dest: Path,
+                   on_epoch_end=None) -> float:
 
     if args.mode == "full":
-        loss_fn = DiceCELoss(K)
-        # loss_fn = CrossEntropy(idk=list(range(K)))  # Supervise both background and foreground
+        loss_fn = DiceCELoss(K, dice_weight=args.dice_weight, ce_weight=args.ce_weight)
     elif args.mode in ["partial"] and args.dataset == 'SEGTHOR':
         loss_fn = CrossEntropy(idk=[0, 1, 3, 4])  # Do not supervise the heart (class 2)
     else:
@@ -265,7 +256,7 @@ def runTraining(args):
                             mult: int = 63 if K == 5 else (255 / (K - 1))
                             save_images(predicted_class * mult,
                                         data['stems'],
-                                        args.dest / f"iter{e:03d}" / m)
+                                        dest / f"iter{e:03d}" / m)
 
                     j += B  # Keep in mind that _in theory_, each batch might have a different size
                     # For the DSC average: do not take the background class (0) into account:
@@ -276,30 +267,146 @@ def runTraining(args):
                                          for k in range(1, K)}
                     tq_iter.set_postfix(postfix_dict)
 
-        # I save it at each epochs, in case the code crashes or I decide to stop it early
-        np.save(args.dest / "loss_tra.npy", log_loss_tra)
-        np.save(args.dest / "dice_tra.npy", log_dice_tra)
-        np.save(args.dest / "loss_val.npy", log_loss_val)
-        np.save(args.dest / "dice_val.npy", log_dice_val)
+        # save it at each epochs, in case the code crashes or decide to stop it early
+        np.save(dest / "loss_tra.npy", log_loss_tra)
+        np.save(dest / "dice_tra.npy", log_dice_tra)
+        np.save(dest / "loss_val.npy", log_loss_val)
+        np.save(dest / "dice_val.npy", log_dice_val)
 
         current_dice: float = log_dice_val[e, :, 1:].mean().item()
+        if on_epoch_end is not None:  # e.g. Optuna reporting / pruning
+            on_epoch_end(e, current_dice)
         if current_dice > best_dice:
             message = f">>> Improved dice at epoch {e}: {best_dice:05.3f}->{current_dice:05.3f} DSC"
             print(message)
             best_dice = current_dice
-            with open(args.dest / "best_epoch.txt", 'w') as f:
+            with open(dest / "best_epoch.txt", 'w') as f:
                 f.write(message)
 
-            best_folder = args.dest / "best_epoch"
+            best_folder = dest / "best_epoch"
             if best_folder.exists():
                 rmtree(best_folder)
-            copytree(args.dest / f"iter{e:03d}", Path(best_folder))
+            copytree(dest / f"iter{e:03d}", Path(best_folder))
 
-            torch.save(net, args.dest / "bestmodel.pkl")
-            torch.save(net.state_dict(), args.dest / "bestweights.pt")
+            torch.save(net, dest / "bestmodel.pkl")
+            torch.save(net.state_dict(), dest / "bestweights.pt")
+
+    return best_dice
 
 
-def main():
+def runTraining(args, on_epoch_end=None) -> float:
+    print(f">>> Setting up to train on {args.dataset} with {args.mode}")
+
+    gpu: bool = args.gpu and torch.cuda.is_available()
+    device = torch.device("cuda") if gpu else torch.device("cpu")
+    print(f">> Picked {device} to run experiments")
+
+    K: int = datasets_params[args.dataset]['K']
+    B: int = datasets_params[args.dataset]['B']
+    sets, stems = build_datasets(args)
+    args.dest.mkdir(parents=True, exist_ok=True)
+
+    # pool the original train and val folders
+    pooled = ConcatDataset([sets['train'], sets['val']])
+    all_stems = stems['train'] + stems['val']
+
+    # hold out the test patients (--seed for identical every fold)
+    rest_idx, test_idx = split_by_patient(all_stems, args.test_frac, args.seed)
+    rest_stems = [all_stems[i] for i in rest_idx]
+    test_p = {patient_id(all_stems[i]) for i in test_idx}
+    print(f">> Test set: {len(test_p)} patients ({len(test_idx)} slices), "
+          f"remaining: {len(rest_idx)} slices")
+    with open(args.dest / "test_patients.json", "w") as f:
+        json.dump(sorted(test_p), f, indent=2)
+
+    # Split the remaining patients into train, val pairs
+    if args.n_folds > 1:
+        folds = patient_folds(rest_stems, args.n_folds, args.seed)
+        splits = [(np.concatenate([folds[i] for i in range(args.n_folds) if i != k]), folds[k])
+                  for k in range(args.n_folds)]
+    else:
+        rel_val = args.val_frac / (1 - args.test_frac)  # val fraction relative to what is left
+        splits = [split_by_patient(rest_stems, rel_val, args.seed + 1)]
+
+    test_loader = DataLoader(Subset(pooled, test_idx.tolist()),
+                             batch_size=B, num_workers=5, shuffle=False)
+
+    run_ids = range(len(splits)) if args.fold is None else [args.fold]
+    val_scores: dict[int, float] = {}
+    test_scores: dict[int, float] = {}
+
+    for k in run_ids:
+        if args.n_folds > 1:
+            print(f"\n{'=' * 20} Fold {k + 1}/{args.n_folds} {'=' * 20}")
+            fold_dir = args.dest / f"fold_{k}"
+        else:
+            print(f"\n{'=' * 20} Single train/val/test split {'=' * 20}")
+            fold_dir = args.dest
+
+        tr_rel, va_rel = splits[k]
+        train_idx = rest_idx[tr_rel]
+        val_idx = rest_idx[va_rel]
+
+        # Sanity checks: no patient shared between train / val / test
+        tr_p = {patient_id(all_stems[i]) for i in train_idx}
+        va_p = {patient_id(all_stems[i]) for i in val_idx}
+        assert not (tr_p & va_p), "Patient leakage between train and val!"
+        assert not (test_p & (tr_p | va_p)), "Patient leakage into the test set!"
+        n_all = len(train_idx) + len(val_idx) + len(test_idx)
+        print(f">> train: {len(tr_p)} patients ({len(train_idx)} slices, {len(train_idx) / n_all:.0%}) | "
+              f"val: {len(va_p)} patients ({len(val_idx)} slices, {len(val_idx) / n_all:.0%}) | "
+              f"test: {len(test_p)} patients ({len(test_idx)} slices, {len(test_idx) / n_all:.0%})")
+
+        net, optimizer = build_model(args, device)
+        train_loader, val_loader = make_loaders(args,
+                                                Subset(pooled, train_idx.tolist()),
+                                                Subset(pooled, val_idx.tolist()))
+
+        cb = None
+        if on_epoch_end is not None: 
+            cb = lambda e, d, k=k: on_epoch_end(k * args.epochs + e, d)
+
+        val_scores[k] = train_one_fold(args, net, optimizer, device,
+                                       train_loader, val_loader, K, fold_dir, cb)
+
+        with open(fold_dir / "val_patients.json", "w") as f:
+            json.dump(sorted(va_p), f, indent=2)
+
+        scores = {"val_best_dice": val_scores[k]}
+
+        # Test evaluation with the best val weights of this fold
+        if not args.skip_test:
+            net.load_state_dict(torch.load(fold_dir / "bestweights.pt", map_location=device))
+            per_class = evaluate(net, test_loader, device)
+            test_scores[k] = float(per_class[1:].mean())
+            scores |= {"test_dice": test_scores[k],
+                       "test_dice_per_class": [float(x) for x in per_class]}
+            print(f">>> Fold {k}: best val Dice {val_scores[k]:.4f} | test Dice {test_scores[k]:.4f}")
+
+        with open(fold_dir / "scores.json", "w") as f:
+            json.dump(scores, f, indent=2)
+
+    val_arr = np.array(list(val_scores.values()))
+    print(f"\n>>> Val  best Dice per fold: {np.round(val_arr, 4).tolist()}")
+    print(f">>> Val  mean +/- std: {val_arr.mean():.4f} +/- {val_arr.std():.4f}")
+    summary: dict[str, Any] = {"val_per_fold": val_scores,
+                               "val_mean": float(val_arr.mean()),
+                               "val_std": float(val_arr.std())}
+    if test_scores:
+        test_arr = np.array(list(test_scores.values()))
+        print(f">>> Test Dice per fold: {np.round(test_arr, 4).tolist()}")
+        print(f">>> Test mean +/- std: {test_arr.mean():.4f} +/- {test_arr.std():.4f}")
+        summary |= {"test_per_fold": test_scores,
+                    "test_mean": float(test_arr.mean()),
+                    "test_std": float(test_arr.std())}
+
+    if args.fold is None: 
+        with open(args.dest / "cv_summary.json", "w") as f:
+            json.dump(summary, f, indent=2)
+
+    return float(val_arr.mean())
+
+def get_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
 
     parser.add_argument('--epochs', default=20, type=int)
@@ -314,13 +421,41 @@ def main():
                              "to test the logics around epochs and logging easily.")
 
     parser.add_argument(
-    "--data_dir",
-    type=Path,
-    default=None,
-    help="Folder containing the train and val image folders."
+        "--data_dir",
+        type=Path,
+        default=None,
+        help="Folder containing the train and val image folders."
     )
-    
+
+    parser.add_argument('--test_frac', default=0.1, type=float,
+                        help="Fraction of patients held out as the test set.")
+    parser.add_argument('--val_frac', default=0.1, type=float,
+                        help="Fraction of patients used for validation in the single-split mode "
+                             "(--n_folds 0 or 1). Ignored with CV.")
+    parser.add_argument('--n_folds', default=0, type=int,
+                        help="K-fold CV on the non-test patients. Validation = (1-test_frac)/n_folds "
+                             "of all patients. 0 or 1 = single train/val split.")
+    parser.add_argument('--fold', default=None, type=int,
+                        help="Run only this fold (0-based), e.g. to parallelise folds over several jobs.")
+    parser.add_argument('--seed', default=0, type=int,
+                        help="Seed for the patient split (keep identical across fold jobs).")
+    parser.add_argument('--skip_test', action='store_true',
+                        help="Do not evaluate on the test set (used while tuning hyperparameters).")
+
+    # Loss
+    parser.add_argument('--dice_weight', default=1.0, type=float, help="Weight of the Dice term in DiceCELoss.")
+    parser.add_argument('--ce_weight', default=1.0, type=float, help="Weight of the cross-entropy term in DiceCELoss.")
+    return parser
+
+
+def main():
+    parser = get_parser()
     args = parser.parse_args()
+
+    if args.fold is not None and not (args.n_folds > 1 and 0 <= args.fold < args.n_folds):
+        parser.error("--fold requires --n_folds > 1 and 0 <= fold < n_folds")
+    if not (0 < args.test_frac < 1) or (args.n_folds <= 1 and not (0 < args.val_frac < 1 - args.test_frac)):
+        parser.error("Need 0 < test_frac < 1 and 0 < val_frac < 1 - test_frac")
 
     pprint(args)
 
