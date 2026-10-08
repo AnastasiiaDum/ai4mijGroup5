@@ -5,19 +5,19 @@ Remove-Item -Recurse -Force results\hp_UNET2D
 
 Run UNet
     2D:
-    python hp_tune.py --dataset SEGTHOR_UNET2D --mode full --dest results/hp_UNET2D --gpu --data_dir data/SEGTHOR --epochs 20 --n_trials 30 --dice_weight 1.0 --ce_weight 1.0
+    python hp_tune.py --dataset SEGTHOR_UNET2D --mode full --dest results/hp_UNET2D --gpu --data_dir data/SEGTHOR --epochs 20 --n_trials 20 --dice_weight 1.0 --ce_weight 1.0
     2.5D:
-    python hp_tune.py --dataset SEGTHOR_UNET25D --mode full --dest results/hp_UNET25D --gpu --data_dir data/SEGTHOR --epochs 20 --n_trials 40 --dice_weight 1.0 --ce_weight 1.0
+    python hp_tune.py --dataset SEGTHOR_UNET25D --mode full --dest results/hp_UNET25D --gpu --data_dir data/SEGTHOR --epochs 20 --n_trials 20 --dice_weight 1.0 --ce_weight 1.0
 
 Run ResUNet
     2D:
-    python hp_tune.py --dataset SEGTHOR_RESUNET2D --mode full --dest results/hp_RESUNET2D --gpu --data_dir data/SEGTHOR --epochs 20 --n_trials 30 --dice_weight 1.0 --ce_weight 1.0
+    python hp_tune.py --dataset SEGTHOR_RESUNET2D --mode full --dest results/hp_RESUNET2D --gpu --data_dir data/SEGTHOR --epochs 20 --n_trials 20 --dice_weight 1.0 --ce_weight 1.0
     2.5:
-    python hp_tune.py --dataset SEGTHOR_RESUNET25D --mode full --dest results/hp_RESUNET25D --gpu --data_dir data/SEGTHOR --epochs 20 --n_trials 40 --dice_weight 1.0 --ce_weight 1.0
+    python hp_tune.py --dataset SEGTHOR_RESUNET25D --mode full --dest results/hp_RESUNET25D --gpu --data_dir data/SEGTHOR --epochs 20 --n_trials 20 --dice_weight 1.0 --ce_weight 1.0
     
 Running 4 models at once:
 foreach ($M in "UNET2D","UNET25D","RESUNET2D","RESUNET25D") {
-  python hp_tune.py --dataset "SEGTHOR_$M" --mode full --dest "results/hp_$M" --gpu --data_dir data/SEGTHOR --epochs 20 --n_trials 30 --dice_weight 1.0 --ce_weight 1.0
+  python hp_tune.py --dataset "SEGTHOR_$M" --mode full --dest "results/hp_$M" --gpu --data_dir data/SEGTHOR --epochs 20 --n_trials 20 --dice_weight 1.0 --ce_weight 1.0
 }
 """
 import argparse
@@ -121,8 +121,8 @@ if __name__ == '__main__':
     study = optuna.create_study(
         study_name=tune_args.study_name or f"hp_{base_args.dataset}",
         direction='maximize',
-        sampler=optuna.samplers.TPESampler(seed=0, n_startup_trials=8),
-        pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=8),
+        sampler=optuna.samplers.TPESampler(seed=0, n_startup_trials=6),
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=3, n_warmup_steps=5),
         storage=f"sqlite:///{(base_args.dest / 'optuna.db').as_posix()}",
         load_if_exists=True,
     )
