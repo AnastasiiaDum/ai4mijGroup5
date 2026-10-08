@@ -54,7 +54,7 @@ from utils import (Dcm,
 
 from losses import (CrossEntropy)
 
-from UNet2_25D import UNet25D
+from UNet2_25D import UNet25D, UNet2D 
 from dataset import SliceDataset, SliceDataset25D
 from losses import CrossEntropy, DiceCELoss
 
@@ -63,13 +63,14 @@ N_NEIGHBORS = 2                      # 5-slice input; try 1 (3 slices) or 3 (7 s
 
 
 datasets_params: dict[str, dict[str, Any]] = {}
+
 # K for the number of classes
 # Avoids the classes with C (often used for the number of Channel)
-datasets_params["TOY2"] = {'K': 2, 'net': shallowCNN, 'B': 2, 'kernels': 8, 'factor': 2}
-datasets_params["SEGTHOR"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
-datasets_params["SEGTHOR_CLEAN"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
-
-datasets_params["SEGTHOR"] = {'K': 5, 'net': UNet25D, 'B': 8, 'use_25d': True}
+# datasets_params["TOY2"] = {'K': 2, 'net': shallowCNN, 'B': 2, 'kernels': 8, 'factor': 2}
+# datasets_params["SEGTHOR"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
+# datasets_params["SEGTHOR_CLEAN"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
+# datasets_params["SEGTHOR"] = {'K': 5, 'net': UNet25D, 'B': 8, 'use_25d': True}
+datasets_params["SEGTHOR_UNET2D"] = {'K': 5, 'net': UNet2D, 'B': 8, 'plain_unet': True}
 
 def img_transform(img):
         img = img.convert('L')
@@ -80,12 +81,12 @@ def img_transform(img):
 
 def gt_transform(K, img):
         img = np.array(img)[...]
-        img = img / (255 / (K - 1)) if K != 5 else img / 63  # max <= 1
-        img = torch.tensor(img, dtype=torch.int64)[None, ...]  # Add one dimension to simulate batch
+        img = img / (255 / (K - 1)) if K != 5 else img / 63  
+        img = torch.tensor(img, dtype=torch.int64)[None, ...] 
         img = class2one_hot(img, K=K)
         return img[0]
 
-# patient wise splitting cross validation
+# patient wise splitting cross 
 PATIENT_RE = re.compile(r"(Patient_\d+)")
 
 def patient_id(stem: str) -> str:
@@ -130,6 +131,8 @@ def build_model(args, device) -> tuple[nn.Module, torch.optim.Optimizer]:
     if use_25d:
         in_ch: int = 2 * N_NEIGHBORS + 1
         net = datasets_params[args.dataset]['net'](in_ch, K)
+    elif datasets_params[args.dataset].get('plain_unet', False):
+        net = datasets_params[args.dataset]['net'](1, K)      # 2D UNet: 1 input channel
     else:
         kernels: int = datasets_params[args.dataset].get('kernels', 8)
         factor: int = datasets_params[args.dataset].get('factor', 2)
@@ -228,22 +231,22 @@ def train_one_fold(args, net, optimizer, device, train_loader, val_loader, K, de
                     img = data['images'].to(device)
                     gt = data['gts'].to(device)
 
-                    if opt:  # So only for training
+                    if opt: 
                         opt.zero_grad()
 
-                    # Sanity tests to see we loaded and encoded the data correctly
+                    # Sanity tests to see if loaded and encoded the data correctly
                     assert 0 <= img.min() and img.max() <= 1
                     B, _, W, H = img.shape
 
                     pred_logits = net(img)
-                    pred_probs = F.softmax(1 * pred_logits, dim=1)  # 1 is the temperature parameter
+                    pred_probs = F.softmax(1 * pred_logits, dim=1) 
 
                     # Metrics computation, not used for training
                     pred_seg = probs2one_hot(pred_probs)
-                    log_dice[e, j:j + B, :] = dice_coef(pred_seg, gt)  # One DSC value per sample and per class
+                    log_dice[e, j:j + B, :] = dice_coef(pred_seg, gt)  
 
                     loss = loss_fn(pred_probs, gt)
-                    log_loss[e, i] = loss.item()  # One loss value per batch (averaged in the loss)
+                    log_loss[e, i] = loss.item()  
 
                     if opt:  # Only for training
                         loss.backward()
@@ -310,8 +313,11 @@ def runTraining(args, on_epoch_end=None) -> float:
     pooled = ConcatDataset([sets['train'], sets['val']])
     all_stems = stems['train'] + stems['val']
 
-    # hold out the test patients (--seed for identical every fold)
-    rest_idx, test_idx = split_by_patient(all_stems, args.test_frac, args.seed)
+    # hold out the test patients (none if test_frac == 0)
+    if args.test_frac > 0:
+        rest_idx, test_idx = split_by_patient(all_stems, args.test_frac, args.seed)
+    else:
+        rest_idx, test_idx = np.arange(len(all_stems)), np.array([], dtype=int)
     rest_stems = [all_stems[i] for i in rest_idx]
     test_p = {patient_id(all_stems[i]) for i in test_idx}
     print(f">> Test set: {len(test_p)} patients ({len(test_idx)} slices), "
@@ -328,8 +334,11 @@ def runTraining(args, on_epoch_end=None) -> float:
         rel_val = args.val_frac / (1 - args.test_frac)  # val fraction relative to what is left
         splits = [split_by_patient(rest_stems, rel_val, args.seed + 1)]
 
-    test_loader = DataLoader(Subset(pooled, test_idx.tolist()),
-                             batch_size=B, num_workers=5, shuffle=False)
+    test_loader = None                                   # <- change 2 replaces the old test_loader lines
+    if len(test_idx) > 0:
+        test_loader = DataLoader(Subset(pooled, test_idx.tolist()),
+                                 batch_size=B, num_workers=5, shuffle=False)
+
 
     run_ids = range(len(splits)) if args.fold is None else [args.fold]
     val_scores: dict[int, float] = {}
@@ -375,7 +384,7 @@ def runTraining(args, on_epoch_end=None) -> float:
         scores = {"val_best_dice": val_scores[k]}
 
         # Test evaluation with the best val weights of this fold
-        if not args.skip_test:
+        if not args.skip_test and test_loader is not None:   # <- changed line
             net.load_state_dict(torch.load(fold_dir / "bestweights.pt", map_location=device))
             per_class = evaluate(net, test_loader, device)
             test_scores[k] = float(per_class[1:].mean())
@@ -454,8 +463,8 @@ def main():
 
     if args.fold is not None and not (args.n_folds > 1 and 0 <= args.fold < args.n_folds):
         parser.error("--fold requires --n_folds > 1 and 0 <= fold < n_folds")
-    if not (0 < args.test_frac < 1) or (args.n_folds <= 1 and not (0 < args.val_frac < 1 - args.test_frac)):
-        parser.error("Need 0 < test_frac < 1 and 0 < val_frac < 1 - test_frac")
+    if not (0 <= args.test_frac < 1) or (args.n_folds <= 1 and not (0 < args.val_frac < 1 - args.test_frac)):
+        parser.error("Need 0 <= test_frac < 1 and 0 < val_frac < 1 - test_frac")
 
     pprint(args)
 
