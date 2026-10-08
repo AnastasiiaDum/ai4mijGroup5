@@ -1,0 +1,36 @@
+Changes needed to be implemented in dataset.py
+1. Add to the top: 
+
+from augmentation import augment_pair
+
+2. To the Class Slicedataset in def __getitem__: 
+        #after this piece of code: 
+def __getitem__(self, index) -> dict[str, Union[Tensor, int, str]]:
+        img_path, gt_path = self.files[index] 
+
+        #add this: 
+        img_pil = Image.open(img_path)
+        gt_pil = Image.open(gt_path) if not self.test_mode else None
+ 
+        if self.augmentation and not self.test_mode:
+            img_pil, gt_pil = augment_pair(img_pil, gt_pil)
+
+        img: Tensor = self.img_transform(img_pil)
+
+        data_dict = {"images": img,
+                     "stems": img_path.stem}
+
+        if not self.test_mode: 
+               gt: Tensor = self.gt_transform(gt_pil)
+
+               _, W, H = img.shape
+               K, _, _ = gt.shape
+               assert gt.shape == (K, W, H)
+
+               data_dict["gts"] = gt
+        return data_dict
+
+Changes in main.py: 
+1. In setup() - for the train_set add augment=True
+                for the val_set augment=False
+                
