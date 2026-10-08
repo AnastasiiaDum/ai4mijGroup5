@@ -65,6 +65,22 @@ def norm_arr_percentile(img: np.ndarray) -> np.ndarray:
     return (normalized * 255).clip(0, 255).astype(np.uint8)
 
 
+def norm_arr_fixed_hu(
+    img: np.ndarray,
+    hu_min: float = -1000.0,
+    hu_max: float = 400.0,
+) -> np.ndarray:
+    """Clip to a fixed HU window, then scale the CT to 0-255."""
+    if hu_max <= hu_min:
+        raise ValueError("hu_max must be larger than hu_min.")
+
+    image = img.astype(np.float32)
+    clipped = np.clip(image, hu_min, hu_max)
+    normalized = (clipped - hu_min) / (hu_max - hu_min)
+
+    return (normalized * 255).clip(0, 255).astype(np.uint8)
+
+
 def sanity_ct(ct, x, y, z, dx, dy, dz) -> bool:
     assert ct.dtype in [np.int16, np.int32], ct.dtype
     assert -1000 <= ct.min(), ct.min()
@@ -100,7 +116,9 @@ def slice_patient(
     source_path: Path,
     shape: tuple[int, int],
     test_mode: bool = False,
-    intensity_mode: str = "baseline"
+    intensity_mode: str = "baseline",
+    hu_min: float = -1000.0,
+    hu_max: float = 400.0,
 ) -> tuple[float, float, float]:
     id_path: Path = source_path / ("train" if not test_mode else "test") / id_
 
@@ -125,6 +143,8 @@ def slice_patient(
 
     if intensity_mode == "percentile":
         norm_ct = norm_arr_percentile(ct)
+    elif intensity_mode == "fixed_hu":
+        norm_ct = norm_arr_fixed_hu(ct, hu_min=hu_min, hu_max=hu_max)
     else:
         norm_ct = norm_arr(ct)
 
@@ -209,7 +229,9 @@ def main(args: argparse.Namespace):
             source_path=src_path,
             shape=tuple(args.shape),
             test_mode=mode == "test",
-            intensity_mode=args.intensity_mode
+            intensity_mode=args.intensity_mode,
+            hu_min=args.hu_min,
+            hu_max=args.hu_max,
         )
         resolutions: list[tuple[float, float, float]]
         iterator = tqdm_(split_ids)
@@ -242,9 +264,21 @@ def get_args() -> argparse.Namespace:
                         help="The number of cores to use for processing")
     parser.add_argument(
         "--intensity_mode",
-        choices=["baseline", "percentile"],
+        choices=["baseline", "percentile", "fixed_hu"],
         default="baseline",
-        help="Choose original scaling or percentile clipping."
+        help="Choose original scaling, percentile clipping, or a fixed HU window."
+    )
+    parser.add_argument(
+        "--hu_min",
+        type=float,
+        default=-1000.0,
+        help="Lower HU limit used when --intensity_mode fixed_hu."
+    )
+    parser.add_argument(
+        "--hu_max",
+        type=float,
+        default=400.0,
+        help="Upper HU limit used when --intensity_mode fixed_hu."
     )
 
     args = parser.parse_args()
