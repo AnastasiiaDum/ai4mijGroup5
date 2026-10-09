@@ -397,7 +397,7 @@ def runTraining(args, on_epoch_end=None) -> float:
 
         #Pass the fold’s stats to training and test evaluation
         val_scores[k] = train_one_fold(args, net, optimizer, device,
-                                       train_loader, val_loader, K, fold_dir, cb, norm = None)
+                                       train_loader, val_loader, K, fold_dir, cb, norm)
 
         with open(fold_dir / "val_patients.json", "w") as f:
             json.dump(sorted(va_p), f, indent=2)
