@@ -1,7 +1,7 @@
 """Tune the Dice vs CrossEntropy weight ratio with Optuna.
 
 Run code:
-python loss_tune.py --dataset SEGTHOR_UNET2D --mode full --dest results/tune_unet2d --gpu --data_dir data/SEGTHOR --epochs 20 --n_trials 30
+python loss_tune.py --dataset SEGTHOR_UNET2D --mode full --dest results/tune_unet2d --gpu --data_dir data/hu_wide_rs18 --epochs 20 --n_trials 30
 
 View optuna results:
 pip install optuna-dashboard
