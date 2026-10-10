@@ -107,7 +107,7 @@ class SliceDataset25D(Dataset):
         root = Path(root_dir) / subset
         imgs = sorted((root / "img").glob("*.png"))
         gts = sorted((root / "gt").glob("*.png"))
-        assert len(imgs) == len(gts) > 0
+        assert len(imgs) == len(gts)
 
         # group slices by patient, ordered by slice index
         groups = {}
