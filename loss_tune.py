@@ -113,10 +113,10 @@ if __name__ == '__main__':
         direction='maximize',
         # n_startup_trials = x number of random values before choosing values
         # based on top performing values from earlier runs
-        sampler=optuna.samplers.TPESampler(seed=0, n_startup_trials=6),
+        sampler=optuna.samplers.TPESampler(seed=0, n_startup_trials=3),
         # n_startup_trials = running first x epochs fully
         # n_warmup_steps = let the combination train for x epochs before eliminating it
-        pruner=optuna.pruners.MedianPruner(n_startup_trials=3, n_warmup_steps=5),
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=3, n_warmup_steps=4),
         storage=f"sqlite:///{(base_args.dest / 'optuna.db').as_posix()}",
         load_if_exists=True,  
     )
