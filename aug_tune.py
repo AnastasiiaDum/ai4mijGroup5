@@ -1,13 +1,19 @@
 """Tune augmentation with Optuna: which augmentations to use AND how strong they are.
 lr / batch size / n_neighbors stay fixed (pass the best values from hp_tune.py).
 
-    python aug_tune.py --dataset SEGTHOR_UNET25D --mode full --gpu --data_dir data/hu_wide_rs18 \
+    Examples of commands to run it, customizable parameters:
+    python aug_tune.py --dataset SEGTHOR_UNET2D --mode full --gpu --data_dir data/hu_wide_rs18 \
         --normalize --dice_weight 2.7 --ce_weight 1.0 --lr 5e-4 --batch_size 8 --n_neighbors 2 \
         --epochs 20 --n_trials 30 --dest results/aug_UNET25D [--mlflow]
+
+    python aug_tune.py --dataset SEGTHOR_UNET25D --mode full --gpu --data_dir data/hu_wide_rs18 --normalize --dice_weight 2.7 --ce_weight 1.0 --lr 5e-4 --batch_size 8 --n_neighbors 2 --epochs 20 --n_trials 30 --dest results/aug_UNET25D --mlflow
 
 The first 5 trials are fixed references: no augmentation, each augmentation alone with
 your original values, and all three together. After that TPE explores combinations and magnitudes.
 Output in --dest: trials.csv, tuning_results.png, best_aug.json (use it with --aug_json).
+
+remove old test runs:
+Remove-Item -Recurse -Force results\aug_check
 """
 import argparse
 import copy
@@ -24,7 +30,7 @@ import optuna
 import torch
 from optuna.trial import TrialState
 
-from augmentation import AugConfig, Augmenter
+from tune_aug_effect import AugConfig, Augmenter
 from main_hyperparameter import get_parser, runTraining
 
 SPATIAL = {'p_spatial': 0.5, 'max_rotation_deg': 10.0, 'max_translation_px': 10.0, 'scale_delta': 0.1}
