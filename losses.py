@@ -24,6 +24,7 @@
 
 
 from torch import einsum
+import torch
 
 from utils import simplex, sset
 
@@ -51,3 +52,17 @@ class CrossEntropy():
 class PartialCrossEntropy(CrossEntropy):
     def __init__(self, **kwargs):
         super().__init__(idk=[1], **kwargs)
+
+class DiceCELoss:
+    """pred_softmax: (B,K,H,W) probabilities; target: (B,K,H,W) one-hot."""
+    def __init__(self, K, dice_weight=1.0, ce_weight=1.0, eps=1e-6):
+        self.K, self.dw, self.cw, self.eps = K, dice_weight, ce_weight, eps
+
+    def __call__(self, pred_softmax, target):
+        target = target.float()
+        ce = -(target * torch.log(pred_softmax.clamp_min(1e-10))).sum(dim=1).mean()
+        inter = (pred_softmax * target).sum(dim=(0, 2, 3))
+        denom = pred_softmax.sum(dim=(0, 2, 3)) + target.sum(dim=(0, 2, 3))
+        dice = (2 * inter + self.eps) / (denom + self.eps)   # per class
+        dice_loss = 1 - dice[1:].mean()                      # skip background
+        return self.cw * ce + self.dw * dice_loss

@@ -38,6 +38,7 @@ from skimage.transform import resize
 
 from utils import map_, tqdm_
 
+from scipy.ndimage import zoom
 
 def norm_arr(img: np.ndarray) -> np.ndarray:
     casted = img.astype(np.float32)
@@ -50,6 +51,31 @@ def norm_arr(img: np.ndarray) -> np.ndarray:
 
     return res.astype(np.uint8)
 
+def resample_inplane(
+    ct: np.ndarray, gt: np.ndarray, dx: float, dy: float, target: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """Resample x/y to `target` mm; z is left untouched."""
+    factors = (dx / target, dy / target, 1.0)
+    ct_r = zoom(ct.astype(np.float32), factors, order=1, mode="nearest")  # linear for CT
+    gt_r = zoom(gt, factors, order=0, mode="nearest")                     # nearest for labels
+    assert ct_r.shape == gt_r.shape, (ct_r.shape, gt_r.shape)
+    return ct_r, gt_r
+
+
+def center_pad_crop(vol: np.ndarray, size: tuple[int, int], fill: float) -> np.ndarray:
+    """Centre-pad or centre-crop x/y to `size`."""
+    out = np.full((size[0], size[1], vol.shape[2]), fill, dtype=vol.dtype)
+    src, dst = [], []
+    for n, m in zip(vol.shape[:2], size):
+        if n >= m:
+            s = (n - m) // 2
+            src.append(slice(s, s + m)); dst.append(slice(0, m))
+        else:
+            s = (m - n) // 2
+            src.append(slice(0, n)); dst.append(slice(s, s + n))
+    out[dst[0], dst[1]] = vol[src[0], src[1]]
+    return out
+
 def norm_arr_percentile(img: np.ndarray) -> np.ndarray:
     """Clip extreme intensities, then scale the CT to 0–255."""
     image = img.astype(np.float32)
@@ -61,6 +87,22 @@ def norm_arr_percentile(img: np.ndarray) -> np.ndarray:
 
     clipped = np.clip(image, low, high)
     normalized = (clipped - low) / (high - low)
+
+    return (normalized * 255).clip(0, 255).astype(np.uint8)
+
+
+def norm_arr_fixed_hu(
+    img: np.ndarray,
+    hu_min: float = -1000.0,
+    hu_max: float = 400.0,
+) -> np.ndarray:
+    """Clip to a fixed HU window, then scale the CT to 0-255."""
+    if hu_max <= hu_min:
+        raise ValueError("hu_max must be larger than hu_min.")
+
+    image = img.astype(np.float32)
+    clipped = np.clip(image, hu_min, hu_max)
+    normalized = (clipped - hu_min) / (hu_max - hu_min)
 
     return (normalized * 255).clip(0, 255).astype(np.uint8)
 
@@ -100,7 +142,10 @@ def slice_patient(
     source_path: Path,
     shape: tuple[int, int],
     test_mode: bool = False,
-    intensity_mode: str = "baseline"
+    intensity_mode: str = "baseline",
+    hu_min: float = -1000.0,
+    hu_max: float = 400.0,
+    target_spacing: float | None = None,
 ) -> tuple[float, float, float]:
     id_path: Path = source_path / ("train" if not test_mode else "test") / id_
 
@@ -123,8 +168,16 @@ def slice_patient(
     else:
         gt = np.zeros_like(ct, dtype=np.uint8)
 
+    if target_spacing is not None:
+        ct, gt = resample_inplane(ct, gt, dx, dy, target_spacing)
+        ct = center_pad_crop(ct, shape, fill=-1000.0)  
+        gt = center_pad_crop(gt, shape, fill=0)        
+        dx = dy = target_spacing                      
+
     if intensity_mode == "percentile":
         norm_ct = norm_arr_percentile(ct)
+    elif intensity_mode == "fixed_hu":
+        norm_ct = norm_arr_fixed_hu(ct, hu_min=hu_min, hu_max=hu_max)
     else:
         norm_ct = norm_arr(ct)
 
@@ -209,7 +262,10 @@ def main(args: argparse.Namespace):
             source_path=src_path,
             shape=tuple(args.shape),
             test_mode=mode == "test",
-            intensity_mode=args.intensity_mode
+            intensity_mode=args.intensity_mode,
+            hu_min=args.hu_min,
+            hu_max=args.hu_max,
+            target_spacing=args.target_spacing,
         )
         resolutions: list[tuple[float, float, float]]
         iterator = tqdm_(split_ids)
@@ -242,10 +298,24 @@ def get_args() -> argparse.Namespace:
                         help="The number of cores to use for processing")
     parser.add_argument(
         "--intensity_mode",
-        choices=["baseline", "percentile"],
+        choices=["baseline", "percentile", "fixed_hu"],
         default="baseline",
-        help="Choose original scaling or percentile clipping."
+        help="Choose original scaling, percentile clipping, or a fixed HU window."
     )
+    parser.add_argument(
+        "--hu_min",
+        type=float,
+        default=-1000.0,
+        help="Lower HU limit used when --intensity_mode fixed_hu."
+    )
+    parser.add_argument(
+        "--hu_max",
+        type=float,
+        default=400.0,
+        help="Upper HU limit used when --intensity_mode fixed_hu."
+    )
+    parser.add_argument('--target_spacing', type=float, default=None,
+                        help="Resample x/y to this spacing in mm before slicing (z unchanged).")
 
     args = parser.parse_args()
     random.seed(args.seed)
