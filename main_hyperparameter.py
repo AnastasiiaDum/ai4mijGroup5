@@ -98,8 +98,11 @@ PATIENT_RE = re.compile(r"(Patient_\d+)")
  
  
 def patient_id(stem: str) -> str:
+    # check if one patient is split into multiple folds to avoid data leakage
     m = PATIENT_RE.search(stem)
-    return m.group(1) if m else stem
+    if m is None:
+        raise ValueError(f"Cannot extract patient id from '{stem}'")
+    return m.group(1)
  
  
 def get_stems(ds, root_dir: Path, split: str, debug: bool) -> list[str]:

@@ -52,11 +52,12 @@ from utils import (Dcm,
                    dice_coef,
                    save_images)
 
-from losses import (CrossEntropy)
+from losses import (CrossEntropy,
+                    CrossEntropy, 
+                    DiceCELoss)
 
 from UNet2_25D import UNet25D, UNet2D 
 from dataset import SliceDataset, SliceDataset25D
-from losses import CrossEntropy, DiceCELoss
 from normalization import compute_stats, normalize
 
 N_NEIGHBORS = 2                      # 5-slice input; try 1 (3 slices) or 3 (7 slices)
@@ -92,7 +93,9 @@ PATIENT_RE = re.compile(r"(Patient_\d+)")
 
 def patient_id(stem: str) -> str:
     m = PATIENT_RE.search(stem)
-    return m.group(1) if m else stem
+    if m is None:
+        raise ValueError(f"Cannot extract patient id from '{stem}'")
+    return m.group(1)
 
 
 def get_stems(ds, root_dir: Path, split: str, debug: bool) -> list[str]:
@@ -166,6 +169,14 @@ def build_datasets(args) -> tuple[dict[str, Any], dict[str, list[str]]]:
 
     stems: dict[str, list[str]] = {}
     stems = {s: get_stems(sets[s], root_dir, s, args.debug) for s in sets}
+
+    if use_25d:   # check that no neighbour stack crosses a patient boundary
+        for name, ds in sets.items():
+            bad = sum(len({patient_id(p.stem) for p in neigh}) != 1
+                      for neigh, _ in ds.samples)
+            assert bad == 0, f"{name}: {bad} stacks mix slices from different patients"
+        print("> 2.5D check passed: every stack stays within one patient")
+        
     return sets, stems
 
 
