@@ -58,6 +58,7 @@ from UNet2_25D import UNet25D, UNet2D
 from ResUNet2_25D import ResUNet2D, ResUNet25D  
 from dataset import SliceDataset, SliceDataset25D
 from losses import CrossEntropy, DiceCELoss
+from normalization import compute_stats, normalize
 
 # N_NEIGHBORS = 2                      # 5-slice input; try 1 (3 slices) or 3 (7 slices)
 DEFAULT_N_NEIGHBORS = 2  
@@ -72,7 +73,9 @@ datasets_params: dict[str, dict[str, Any]] = {}
 # datasets_params["SEGTHOR_CLEAN"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
 # datasets_params["SEGTHOR"] = {'K': 5, 'net': UNet25D, 'B': 8, 'use_25d': True}
 datasets_params["SEGTHOR_UNET2D"] = {'K': 5, 'net': UNet2D, 'B': 8, 'plain_unet': True}
-
+datasets_params["SEGTHOR_UNET25D"]    = {'K': 5, 'net': UNet25D,    'B': 8, 'use_25d': True}
+datasets_params["SEGTHOR_RESUNET2D"]  = {'K': 5, 'net': ResUNet2D,  'B': 8, 'plain_unet': True}
+datasets_params["SEGTHOR_RESUNET25D"] = {'K': 5, 'net': ResUNet25D, 'B': 8, 'use_25d': True}
 
 def img_transform(img):
     img = img.convert('L')
@@ -186,11 +189,11 @@ def make_loaders(args, train_ds, val_ds) -> tuple[DataLoader, DataLoader]:
  
  
 @torch.no_grad()
-def evaluate(net, loader, device) -> np.ndarray:
+def evaluate(net, loader, device, norm = None) -> np.ndarray:
     net.eval()
     dices = []
     for data in loader:
-        img = data['images'].to(device)
+        img = normalize(data['images'].to(device), norm)
         gt = data['gts'].to(device)
         probs = F.softmax(net(img), dim=1)
         dices.append(dice_coef(probs2one_hot(probs), gt).cpu())
@@ -199,7 +202,7 @@ def evaluate(net, loader, device) -> np.ndarray:
  
 # training fold
 def train_one_fold(args, net, optimizer, device, train_loader, val_loader, K, dest: Path,
-                   on_epoch_end=None) -> float:
+                   on_epoch_end=None, norm = None) -> float:
  
     if args.mode == "full":
         loss_fn = DiceCELoss(K, dice_weight=args.dice_weight, ce_weight=args.ce_weight)
@@ -249,6 +252,9 @@ def train_one_fold(args, net, optimizer, device, train_loader, val_loader, K, de
                     # Sanity tests to see if loaded and encoded the data correctly
                     assert 0 <= img.min() and img.max() <= 1
                     B, _, W, H = img.shape
+
+                    # Normalize the input images using the computed mean and std
+                    img = normalize(img, norm)
  
                     pred_logits = net(img)
                     pred_probs = F.softmax(1 * pred_logits, dim=1)
@@ -324,6 +330,11 @@ def runTraining(args, on_epoch_end=None) -> float:
     # pool the original train and val folders
     pooled = ConcatDataset([sets['train'], sets['val']])
     all_stems = stems['train'] + stems['val']
+
+    # Image paths in the same order as the pooled dataset, so indices match files
+    root_dir = args.data_dir if args.data_dir is not None else Path("data") / args.dataset
+    all_img_paths = ([root_dir / "train" / "img" / f"{s}.png" for s in stems['train']] +
+                     [root_dir / "val" / "img" / f"{s}.png" for s in stems['val']])
  
     # hold out the test patients (none if test_frac == 0)
     if args.test_frac > 0:
@@ -376,7 +387,17 @@ def runTraining(args, on_epoch_end=None) -> float:
         print(f">> train: {len(tr_p)} patients ({len(train_idx)} slices, {len(train_idx) / n_all:.0%}) | "
               f"val: {len(va_p)} patients ({len(val_idx)} slices, {len(val_idx) / n_all:.0%}) | "
               f"test: {len(test_p)} patients ({len(test_idx)} slices, {len(test_idx) / n_all:.0%})")
- 
+
+        # Compute mean/std from this fold's training patients only, and save them
+        fold_dir.mkdir(parents=True, exist_ok=True)
+        norm = None
+        if args.normalize:
+            norm = compute_stats([all_img_paths[i] for i in train_idx])
+            with open(fold_dir / "norm_stats.json", "w") as f:
+                json.dump(norm | {"train_patients": sorted(tr_p)}, f, indent=2)
+            print(f">> Normalization (train patients only): "
+                  f"mean={norm['mean']:.4f}, std={norm['std']:.4f}")
+            
         net, optimizer = build_model(args, device)
         train_loader, val_loader = make_loaders(args,
                                                 Subset(pooled, train_idx.tolist()),
@@ -387,7 +408,7 @@ def runTraining(args, on_epoch_end=None) -> float:
             cb = lambda e, d, k=k: on_epoch_end(k * args.epochs + e, d)
  
         val_scores[k] = train_one_fold(args, net, optimizer, device,
-                                       train_loader, val_loader, K, fold_dir, cb)
+                                       train_loader, val_loader, K, fold_dir, cb, norm)
  
         with open(fold_dir / "val_patients.json", "w") as f:
             json.dump(sorted(va_p), f, indent=2)
@@ -397,7 +418,7 @@ def runTraining(args, on_epoch_end=None) -> float:
         # Test evaluation with the best val weights of this fold
         if not args.skip_test and test_loader is not None:
             net.load_state_dict(torch.load(fold_dir / "bestweights.pt", map_location=device))
-            per_class = evaluate(net, test_loader, device)
+            per_class = evaluate(net, test_loader, device, norm)
             test_scores[k] = float(per_class[1:].mean())
             scores |= {"test_dice": test_scores[k],
                        "test_dice_per_class": [float(x) for x in per_class]}
@@ -473,6 +494,11 @@ def get_parser() -> argparse.ArgumentParser:
                         help="Overrides the per-dataset default batch size.")
     parser.add_argument('--n_neighbors', default=DEFAULT_N_NEIGHBORS, type=int,
                         help="Neighbouring slices on each side (2.5D only): input has 2*n+1 channels.")
+    
+    # Normalization
+    parser.add_argument('--normalize', action='store_true',
+                        help="Z-score images with mean/std of each fold's training patients.")
+    
     return parser
  
  
