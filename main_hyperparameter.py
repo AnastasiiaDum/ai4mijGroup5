@@ -31,6 +31,7 @@ from operator import itemgetter
 from shutil import copytree, rmtree
 import re
 import json
+import copy
 
 import torch
 import numpy as np
@@ -59,6 +60,7 @@ from ResUNet2_25D import ResUNet2D, ResUNet25D
 from dataset import SliceDataset, SliceDataset25D
 from losses import CrossEntropy, DiceCELoss
 from normalization import compute_stats, normalize
+from tune_aug_effect import AugConfig, Augmenter
 
 # N_NEIGHBORS = 2                      # 5-slice input; try 1 (3 slices) or 3 (7 slices)
 DEFAULT_N_NEIGHBORS = 2  
@@ -159,27 +161,43 @@ def build_model(args, device) -> tuple[nn.Module, torch.optim.Optimizer]:
  
     optimizer = torch.optim.Adam(net.parameters(), lr=args.lr, betas=(0.9, 0.999))
     return net, optimizer
+
+def available_splits(root_dir: Path) -> list[str]:
+    """Original folders that actually contain gt PNGs; the pool is re-split by patient anyway."""
+    splits = [s for s in ('train', 'val') if any((root_dir / s / "gt").glob("*.png"))]
+    if not splits:
+        raise FileNotFoundError(f"No train/ or val/ folder with gt/*.png found in {root_dir}")
+    return splits
+
  
- 
-def build_datasets(args) -> tuple[dict[str, Any], dict[str, list[str]]]:
+def build_datasets(args, augment=None) -> tuple[dict[str, Any], dict[str, list[str]]]:
     K: int = datasets_params[args.dataset]['K']
     use_25d: bool = datasets_params[args.dataset].get('use_25d', False)
     root_dir = args.data_dir if args.data_dir is not None else Path("data") / args.dataset
- 
+
     if use_25d:
         make_set = partial(SliceDataset25D, n_neighbors=args.n_neighbors)
     else:
         make_set = SliceDataset
- 
+
     sets: dict[str, Any] = {}
-    for split in ('train', 'val'):
+    for split in available_splits(root_dir):
         sets[split] = make_set(split,
                                root_dir,
                                img_transform=img_transform,
                                gt_transform=partial(gt_transform, K),
-                               debug=args.debug)
- 
+                               debug=args.debug,
+                               augment_fn=augment)
+
     stems: dict[str, list[str]] = {s: get_stems(sets[s], root_dir, s, args.debug) for s in sets}
+
+    if use_25d:   # check that no neighbour stack crosses a patient boundary
+        for name, ds in sets.items():
+            bad = sum(len({patient_id(p.stem) for p in neigh}) != 1
+                      for neigh, _ in ds.samples)
+            assert bad == 0, f"{name}: {bad} stacks mix slices from different patients"
+        print("> 2.5D check passed: every stack stays within one patient")
+
     return sets, stems
  
  
@@ -329,15 +347,28 @@ def runTraining(args, on_epoch_end=None) -> float:
     B: int = get_batch_size(args)
     sets, stems = build_datasets(args)
     args.dest.mkdir(parents=True, exist_ok=True)
- 
-    # pool the original train and val folders
-    pooled = ConcatDataset([sets['train'], sets['val']])
-    all_stems = stems['train'] + stems['val']
+
+    aug = getattr(args, 'aug', None)
+    if aug is None and getattr(args, 'aug_json', None):
+        aug = Augmenter(AugConfig(**json.load(open(args.aug_json))))
+
+    if aug is not None:
+        aug_sets = {}
+        for s, ds in sets.items():
+            ds_aug = copy.copy(ds)      # shares the file list, only augment_fn differs
+            ds_aug.augment_fn = aug
+            aug_sets[s] = ds_aug
+    else:
+        aug_sets = sets
+    
+    order = list(sets)
+    pooled     = ConcatDataset([sets[s] for s in order])
+    pooled_aug = ConcatDataset([aug_sets[s] for s in order])
+    all_stems = [st for s in order for st in stems[s]]
 
     # Image paths in the same order as the pooled dataset, so indices match files
     root_dir = args.data_dir if args.data_dir is not None else Path("data") / args.dataset
-    all_img_paths = ([root_dir / "train" / "img" / f"{s}.png" for s in stems['train']] +
-                     [root_dir / "val" / "img" / f"{s}.png" for s in stems['val']])
+    all_img_paths = [root_dir / s / "img" / f"{st}.png" for s in order for st in stems[s]]
  
     # hold out the test patients (none if test_frac == 0)
     if args.test_frac > 0:
@@ -403,7 +434,7 @@ def runTraining(args, on_epoch_end=None) -> float:
             
         net, optimizer = build_model(args, device)
         train_loader, val_loader = make_loaders(args,
-                                                Subset(pooled, train_idx.tolist()),
+                                                Subset(pooled_aug, train_idx.tolist()),
                                                 Subset(pooled, val_idx.tolist()))
  
         cb = None
@@ -501,7 +532,10 @@ def get_parser() -> argparse.ArgumentParser:
     # Normalization
     parser.add_argument('--normalize', action='store_true',
                         help="Z-score images with mean/std of each fold's training patients.")
-    
+
+    # augmentation tuning (aug_tune.py)
+    parser.add_argument('--aug_json', type=Path, default=None,
+                        help="JSON with an AugConfig (best_aug.json from aug_tune.py).")
     return parser
  
  

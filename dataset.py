@@ -54,12 +54,14 @@ def make_dataset(root, subset) -> list[tuple[Path, Path | None]]:
 
 class SliceDataset(Dataset):
     def __init__(self, subset, root_dir, img_transform=None,
-                 gt_transform=None, augment=False, equalize=False, debug=False):
+                 gt_transform=None, augment=False, equalize=False, 
+                 debug=False,  augment_fn=None):
         self.root_dir: str = root_dir
         self.img_transform: Callable = img_transform
         self.gt_transform: Callable = gt_transform
         self.augmentation: bool = augment
         self.equalize: bool = equalize
+        self.augment_fn = augment_fn
 
         self.test_mode: bool = subset == 'test'
 
@@ -73,22 +75,35 @@ class SliceDataset(Dataset):
         return len(self.files)
 
     def __getitem__(self, index) -> dict[str, Union[Tensor, int, str]]:
+        # img_path, gt_path = self.files[index]
+
+        # img: Tensor = self.img_transform(Image.open(img_path))
+
+        # data_dict = {"images": img,
+        #              "stems": img_path.stem}
+
+        # if not self.test_mode:
+        #     gt: Tensor = self.gt_transform(Image.open(gt_path))
+
+        #     _, W, H = img.shape
+        #     K, _, _ = gt.shape
+            # assert gt.shape == (K, W, H)
+
+            # data_dict["gts"] = gt
         img_path, gt_path = self.files[index]
+        img = Image.open(img_path)
+        gt = None if self.test_mode else Image.open(gt_path)
+        if self.augment_fn is not None:
+            [img], gt = self.augment_fn([img], gt)
+        img = self.img_transform(img)
 
-        img: Tensor = self.img_transform(Image.open(img_path))
-
-        data_dict = {"images": img,
-                     "stems": img_path.stem}
-
+        data_dict = {"images": img, "stems": img_path.stem}
         if not self.test_mode:
-            gt: Tensor = self.gt_transform(Image.open(gt_path))
-
+            gt = self.gt_transform(gt)
             _, W, H = img.shape
             K, _, _ = gt.shape
             assert gt.shape == (K, W, H)
-
             data_dict["gts"] = gt
-
         return data_dict
 
 class SliceDataset25D(Dataset):
@@ -101,13 +116,15 @@ class SliceDataset25D(Dataset):
     _pat = re.compile(r"^(.*)_(\d+)$")
 
     def __init__(self, subset, root_dir, img_transform=None, gt_transform=None,
-                 debug=False, n_neighbors=2):
+                 debug=False, n_neighbors=2, augment_fn=None):
         self.img_transform = img_transform
         self.gt_transform = gt_transform
+        self.augment_fn = augment_fn
         root = Path(root_dir) / subset
         imgs = sorted((root / "img").glob("*.png"))
         gts = sorted((root / "gt").glob("*.png"))
-        assert len(imgs) == len(gts)
+        assert len(imgs) == len(gts) > 0, \
+            f"{subset}: {len(imgs)} imgs vs {len(gts)} gts in {root}"
 
         # group slices by patient, ordered by slice index
         groups = {}
@@ -140,7 +157,14 @@ class SliceDataset25D(Dataset):
 
     def __getitem__(self, index):
         neigh, gt_path = self.samples[index]
-        stack = torch.cat([self.img_transform(Image.open(p)) for p in neigh], dim=0)
-        gt = self.gt_transform(Image.open(gt_path))
+        imgs = [Image.open(p) for p in neigh]
+        gt = Image.open(gt_path)
+
+        if self.augment_fn is not None:
+            # same spatial transform for every slice and for the center gt
+            imgs, gt = self.augment_fn(imgs, gt)
+
+        stack = torch.cat([self.img_transform(i) for i in imgs], dim=0)
+        gt = self.gt_transform(gt)
         center = neigh[len(neigh) // 2]
         return {"images": stack, "gts": gt, "stems": center.stem}
