@@ -2,6 +2,8 @@ torch
 numpy
 nibabel
 torchvision
+pandas
+matplotlib
 tqdm
 pillow
 scikit-image
