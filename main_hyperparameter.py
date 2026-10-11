@@ -343,6 +343,8 @@ def train_one_fold(args, net, optimizer, device, train_loader, val_loader, K, de
 
         #only keep best epoch
         rmtree(dest / f"iter{e:03d}", ignore_errors=True)   
+        
+        torch.save(net.state_dict(), dest / "lastweights.pt")   # final model for --full_train
  
     return best_dice
  
@@ -423,11 +425,16 @@ def runTraining(args, on_epoch_end=None) -> float:
         tr_rel, va_rel = splits[k]
         train_idx = rest_idx[tr_rel]
         val_idx = rest_idx[va_rel]
+
+        # train on ALL non-test patients; val is a subset of train (monitoring only)
+        if args.full_train:      
+           train_idx = rest_idx
  
         # Sanity checks: no patient shared between train / val / test
         tr_p = {patient_id(all_stems[i]) for i in train_idx}
         va_p = {patient_id(all_stems[i]) for i in val_idx}
-        assert not (tr_p & va_p), "Patient leakage between train and val!"
+        if not args.full_train:
+            assert not (tr_p & va_p), "Patient leakage between train and val!"
         assert not (test_p & (tr_p | va_p)), "Patient leakage into the test set!"
         n_all = len(train_idx) + len(val_idx) + len(test_idx)
         print(f">> train: {len(tr_p)} patients ({len(train_idx)} slices, {len(train_idx) / n_all:.0%}) | "
@@ -569,6 +576,11 @@ def get_parser() -> argparse.ArgumentParser:
     # augmentation tuning (aug_tune.py)
     parser.add_argument('--aug_json', type=Path, default=None,
                         help="JSON with an AugConfig (best_aug.json from aug_tune.py).")
+
+    #allow full training
+    parser.add_argument('--full_train', action='store_true',
+                       help="Train on all non-test patients for a fixed --epochs; use lastweights.pt.")
+
     return parser
  
  
