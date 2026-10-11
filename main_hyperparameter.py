@@ -167,7 +167,9 @@ def build_model(args, device) -> tuple[nn.Module, torch.optim.Optimizer]:
     net.init_weights()
     net.to(device)
  
-    optimizer = torch.optim.Adam(net.parameters(), lr=args.lr, betas=(0.9, 0.999))
+    # lr_factor = 1.0 normally; 0.1 for fine-tuning (lr / 10)
+    optimizer = torch.optim.Adam(net.parameters(), lr=args.lr * args.lr_factor, betas=(0.9, 0.999))
+  
     return net, optimizer
 
 def available_splits(root_dir: Path) -> list[str]:
@@ -247,6 +249,7 @@ def train_one_fold(args, net, optimizer, device, train_loader, val_loader, K, de
     log_dice_val: Tensor = torch.zeros((args.epochs, len(val_loader.dataset), K))
  
     best_dice: float = 0
+    since_best = 0
  
     for e in range(args.epochs):
         for m in ['train', 'val']:
@@ -327,6 +330,7 @@ def train_one_fold(args, net, optimizer, device, train_loader, val_loader, K, de
         if on_epoch_end is not None:  # e.g. Optuna reporting / pruning
             on_epoch_end(e, current_dice)
         if current_dice > best_dice:
+            since_best = 0
             message = f">>> Improved dice at epoch {e}: {best_dice:05.3f}->{current_dice:05.3f} DSC"
             print(message)
             best_dice = current_dice
@@ -340,11 +344,18 @@ def train_one_fold(args, net, optimizer, device, train_loader, val_loader, K, de
  
             torch.save(net, dest / "bestmodel.pkl")
             torch.save(net.state_dict(), dest / "bestweights.pt")
+        else:
+            since_best += 1
 
         #only keep best epoch
         rmtree(dest / f"iter{e:03d}", ignore_errors=True)   
         
         torch.save(net.state_dict(), dest / "lastweights.pt")   # final model for --full_train
+
+        # Early stopping (off when --patience 0)                <-- new
+        if args.patience and since_best >= args.patience:
+            print(f">> Early stopping at epoch {e}: no improvement for {args.patience} epochs")
+            break
  
     return best_dice
  
@@ -452,6 +463,13 @@ def runTraining(args, on_epoch_end=None) -> float:
                   f"mean={norm['mean']:.4f}, std={norm['std']:.4f}")
             
         net, optimizer = build_model(args, device)
+      
+        # Fine-tuning: start from this fold's best checkpoint of a previous run
+        if args.resume_dir is not None:
+            w = args.resume_dir / (f"fold_{k}" if args.n_folds > 1 else "") / "bestweights.pt"
+            net.load_state_dict(torch.load(w, map_location=device))
+            print(f">> Resumed from {w} | lr = {args.lr * args.lr_factor:.2e}")
+          
         cb = None
         if on_epoch_end is not None:
             cb = lambda e, d, k=k: on_epoch_end(k * args.epochs + e, d)
@@ -580,6 +598,14 @@ def get_parser() -> argparse.ArgumentParser:
     #allow full training
     parser.add_argument('--full_train', action='store_true',
                        help="Train on all non-test patients for a fixed --epochs; use lastweights.pt.")
+
+    # Fine-tuning / early stopping
+    parser.add_argument('--resume_dir', type=Path, default=None,
+                        help="Start each fold from <resume_dir>/fold_k/bestweights.pt.")
+    parser.add_argument('--lr_factor', type=float, default=1.0,
+                        help="Multiply the learning rate (0.1 for fine-tuning).")
+    parser.add_argument('--patience', type=int, default=0,
+                        help="Stop after this many epochs without val improvement (0 = off).")
 
     return parser
  
