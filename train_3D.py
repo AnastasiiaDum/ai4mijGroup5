@@ -29,6 +29,8 @@ from torch.utils.data import DataLoader, Dataset
 from losses import DiceCELoss
 from normalization import normalize
 from utils import dice_coef, probs2class, probs2one_hot, save_images, tqdm_
+
+from tune_aug_effect import _affine_coeffs, _apply_affine
  
 STEM_RE = re.compile(r"^(?P<patient>.+)_(?P<z>\d+)$")
 # Windows starts workers by pickling the dataset (all volumes) into each one
@@ -47,7 +49,19 @@ def group_slices(all_stems: list[str], all_img_paths: list[Path], indices) -> di
         groups[m["patient"]].append((int(m["z"]), img_path, gt_path, stem))
     return {p: sorted(v) for p, v in sorted(groups.items())}
  
- 
+def augment_patch(aug, img: np.ndarray, gt: np.ndarray, rng) -> tuple[np.ndarray, np.ndarray]:
+    #Augment 3D patch: one random draw for the whole patch
+    params = aug.draw(rng)
+    if aug.is_identity(params):
+        return img, gt
+    imgs, _ = aug.apply([Image.fromarray(s) for s in img], None, params, rng)  
+    if params['spatial'] is not None:                                      
+        angle, tx, ty, scale = params['spatial']
+        coeffs = _affine_coeffs(imgs[0].size, angle, tx, ty, scale)
+        gt = np.stack([np.asarray(_apply_affine(Image.fromarray(s), coeffs, Image.NEAREST, 0))
+                       for s in gt])                                            
+    return np.stack([np.asarray(i) for i in imgs]), gt
+  
 class VolumeDataset(Dataset):
     """Patient volumes stacked from the per-slice PNGs (kept in memory as uint8).
  
@@ -57,8 +71,9 @@ class VolumeDataset(Dataset):
     """
  
     def __init__(self, patients: dict[str, list[tuple]], K: int, patch_depth: int,
-                 samples_per_volume: int = 1, train: bool = True):
+                 samples_per_volume: int = 1, train: bool = True, augment_fn=None):
         self.K, self.depth, self.train = K, patch_depth, train
+        self.augment_fn = augment_fn if train else None
         self.samples_per_volume = samples_per_volume if train else 1
         self.names: list[str] = []
         self.imgs: list[np.ndarray] = []
@@ -97,8 +112,13 @@ class VolumeDataset(Dataset):
             img = np.pad(img, ((0, pad), (0, 0), (0, 0)))
             gt = np.pad(gt, ((0, pad), (0, 0), (0, 0)))
             z = self.depth
-        z0 = int(torch.randint(0, z - self.depth + 1, (1,)))  
-        img_t, gt_t = self._to_tensors(img[z0:z0 + self.depth], gt[z0:z0 + self.depth])
+        z0 = int(torch.randint(0, z - self.depth + 1, (1,))) 
+        img_p, gt_p = img[z0:z0 + self.depth], gt[z0:z0 + self.depth]
+        #3D augmentation training
+        if self.augment_fn is not None:                      
+            img_p, gt_p = augment_patch(self.augment_fn, img_p, gt_p, np.random.default_rng())
+        img_t, gt_t = self._to_tensors(img_p, gt_p)
+      
         return {"images": img_t, "gts": gt_t}
  
  
