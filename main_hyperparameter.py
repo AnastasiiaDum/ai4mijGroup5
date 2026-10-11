@@ -477,7 +477,7 @@ def runTraining(args, on_epoch_end=None) -> float:
         if use_3d:
             # 3D: stack this fold's slices into patient volumes; train on random patches
             train_ds = VolumeDataset(group_slices(all_stems, all_img_paths, train_idx), K,
-                                     args.patch_depth, args.samples_per_volume, train=True)
+                                     args.patch_depth, args.samples_per_volume, train=True, augment_fn=aug)
             val_ds = VolumeDataset(group_slices(all_stems, all_img_paths, val_idx), K,
                                    args.patch_depth, train=False)
             val_scores[k] = train_one_fold_3d(args, net, optimizer, device, train_ds, val_ds,
