@@ -180,6 +180,7 @@ def train_one_fold_3d(args, net, optimizer, device, train_ds: VolumeDataset, val
     log_loss_tra = torch.zeros((args.epochs, len(train_loader)))
     log_dice_val = None
     best_dice = 0.0
+    since_best = 0 
  
     for e in range(args.epochs):
         net.train()
@@ -217,6 +218,7 @@ def train_one_fold_3d(args, net, optimizer, device, train_ds: VolumeDataset, val
         if on_epoch_end is not None:            
             on_epoch_end(e, current_dice)
         if current_dice > best_dice:
+            since_best = 0
             message = f">>> Improved dice at epoch {e}: {best_dice:05.3f}->{current_dice:05.3f} DSC"
             print(message)
             best_dice = current_dice
@@ -227,8 +229,15 @@ def train_one_fold_3d(args, net, optimizer, device, train_ds: VolumeDataset, val
             copytree(dest / f"iter{e:03d}", best_folder)
             torch.save(net, dest / "bestmodel.pkl")
             torch.save(net.state_dict(), dest / "bestweights.pt")
+        else:
+            since_best += 1
 
         #keep only best epoch (fix of memory issue)
         rmtree(dest / f"iter{e:03d}", ignore_errors=True)  
+        torch.save(net.state_dict(), dest / "lastweights.pt")    
+
+        if args.patience and since_best >= args.patience:          
+            print(f">> Early stopping at epoch {e}: no improvement for {args.patience} epochs")
+            break
  
     return best_dice
