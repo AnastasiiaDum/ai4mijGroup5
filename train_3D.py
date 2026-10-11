@@ -228,7 +228,7 @@ def train_one_fold_3d(args, net, optimizer, device, train_ds: VolumeDataset, val
             torch.save(net, dest / "bestmodel.pkl")
             torch.save(net.state_dict(), dest / "bestweights.pt")
 
-            #keep only best epoch (fix of memory issue)
-            rmtree(dest / f"iter{e:03d}", ignore_errors=True)  
+        #keep only best epoch (fix of memory issue)
+        rmtree(dest / f"iter{e:03d}", ignore_errors=True)  
  
     return best_dice
