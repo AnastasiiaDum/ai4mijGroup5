@@ -235,12 +235,18 @@ def evaluate(net, loader, device, norm = None) -> np.ndarray:
 def train_one_fold(args, net, optimizer, device, train_loader, val_loader, K, dest: Path,
                    on_epoch_end=None, norm = None) -> float:
  
-    if args.mode == "full":
+    if args.loss == "ce":
+        loss_fn = CrossEntropy(idk=list(range(K)))   # supervise all classes, no Dice term
+        loss_name = "CrossEntropy only"
+    elif args.mode == "full":
         loss_fn = DiceCELoss(K, dice_weight=args.dice_weight, ce_weight=args.ce_weight)
+        loss_name = f"DiceCELoss (dice_weight={args.dice_weight}, ce_weight={args.ce_weight})"
     elif args.mode in ["partial"] and args.dataset == 'SEGTHOR':
-        loss_fn = CrossEntropy(idk=[0, 1, 3, 4])  # Do not supervise the heart (class 2)
+        loss_fn = CrossEntropy(idk=[0, 1, 3, 4])
+        loss_name = "CrossEntropy (heart not supervised)"
     else:
         raise ValueError(args.mode, args.dataset)
+    print(f">> Loss: {loss_name}")
  
     # Notice one has the length of the _loader_, and the other one of the _dataset_
     log_loss_tra: Tensor = torch.zeros((args.epochs, len(train_loader)))
@@ -569,6 +575,8 @@ def get_parser() -> argparse.ArgumentParser:
                         help="Seed for the patient split (keep identical across fold jobs).")
     parser.add_argument('--skip_test', action='store_true',
                         help="Do not evaluate on the test set (used while tuning hyperparameters).")
+    parser.add_argument('--loss', default='dicece', choices=['dicece', 'ce'],
+                        help="'ce' = plain cross-entropy on all classes (baseline).")
  
     # Loss
     parser.add_argument('--dice_weight', default=1.0, type=float, help="Weight of the Dice term in DiceCELoss.")
