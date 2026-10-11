@@ -62,6 +62,11 @@ from losses import CrossEntropy, DiceCELoss
 from normalization import compute_stats, normalize
 from tune_aug_effect import AugConfig, Augmenter
 
+#3D Models and training
+from UNet3D import UNet3D                      
+from ResUNet3D import ResUNet3D
+from train_3D import VolumeDataset, group_slices, train_one_fold_3d, evaluate_3d
+
 # N_NEIGHBORS = 2                      # 5-slice input; try 1 (3 slices) or 3 (7 slices)
 DEFAULT_N_NEIGHBORS = 2  
 
@@ -78,6 +83,9 @@ datasets_params["SEGTHOR_UNET2D"] = {'K': 5, 'net': UNet2D, 'B': 8, 'plain_unet'
 datasets_params["SEGTHOR_UNET25D"]    = {'K': 5, 'net': UNet25D,    'B': 8, 'use_25d': True}
 datasets_params["SEGTHOR_RESUNET2D"]  = {'K': 5, 'net': ResUNet2D,  'B': 8, 'plain_unet': True}
 datasets_params["SEGTHOR_RESUNET25D"] = {'K': 5, 'net': ResUNet25D, 'B': 8, 'use_25d': True}
+# 3D models: plain_unet = built as net(1, K); use_3d = trained on 3D patches (train3d.py)
+datasets_params["SEGTHOR_UNET3D"]    = {'K': 5, 'net': UNet3D,    'B': 2, 'plain_unet': True, 'use_3d': True}
+datasets_params["SEGTHOR_RESUNET3D"] = {'K': 5, 'net': ResUNet3D, 'B': 2, 'plain_unet': True, 'use_3d': True}
 
 def img_transform(img):
     img = img.convert('L')
@@ -332,6 +340,9 @@ def train_one_fold(args, net, optimizer, device, train_loader, val_loader, K, de
  
             torch.save(net, dest / "bestmodel.pkl")
             torch.save(net.state_dict(), dest / "bestweights.pt")
+
+        #only keep best epoch
+        rmtree(dest / f"iter{e:03d}", ignore_errors=True)   
  
     return best_dice
  
@@ -345,6 +356,7 @@ def runTraining(args, on_epoch_end=None) -> float:
  
     K: int = datasets_params[args.dataset]['K']
     B: int = get_batch_size(args)
+    use_3d: bool = datasets_params[args.dataset].get('use_3d', False)   # 3D models train on volumes
     sets, stems = build_datasets(args)
     args.dest.mkdir(parents=True, exist_ok=True)
 
@@ -433,16 +445,25 @@ def runTraining(args, on_epoch_end=None) -> float:
                   f"mean={norm['mean']:.4f}, std={norm['std']:.4f}")
             
         net, optimizer = build_model(args, device)
-        train_loader, val_loader = make_loaders(args,
-                                                Subset(pooled_aug, train_idx.tolist()),
-                                                Subset(pooled, val_idx.tolist()))
- 
         cb = None
         if on_epoch_end is not None:
             cb = lambda e, d, k=k: on_epoch_end(k * args.epochs + e, d)
- 
-        val_scores[k] = train_one_fold(args, net, optimizer, device,
-                                       train_loader, val_loader, K, fold_dir, cb, norm)
+
+        if use_3d:
+            # 3D: stack this fold's slices into patient volumes; train on random patches
+            train_ds = VolumeDataset(group_slices(all_stems, all_img_paths, train_idx), K,
+                                     args.patch_depth, args.samples_per_volume, train=True)
+            val_ds = VolumeDataset(group_slices(all_stems, all_img_paths, val_idx), K,
+                                   args.patch_depth, train=False)
+            val_scores[k] = train_one_fold_3d(args, net, optimizer, device, train_ds, val_ds,
+                                              K, B, fold_dir, cb, norm)
+        else:
+            # 2D / 2.5D (training slices augmented if --aug_json / args.aug is set)
+            train_loader, val_loader = make_loaders(args,
+                                                    Subset(pooled_aug, train_idx.tolist()),
+                                                    Subset(pooled, val_idx.tolist()))
+            val_scores[k] = train_one_fold(args, net, optimizer, device,
+                                           train_loader, val_loader, K, fold_dir, cb, norm)
  
         with open(fold_dir / "val_patients.json", "w") as f:
             json.dump(sorted(va_p), f, indent=2)
@@ -452,7 +473,13 @@ def runTraining(args, on_epoch_end=None) -> float:
         # Test evaluation with the best val weights of this fold
         if not args.skip_test and test_loader is not None:
             net.load_state_dict(torch.load(fold_dir / "bestweights.pt", map_location=device))
-            per_class = evaluate(net, test_loader, device, norm)
+            if use_3d:
+                # 3D: sliding-window prediction over each test volume, scored per slice
+                test_ds = VolumeDataset(group_slices(all_stems, all_img_paths, test_idx), K,
+                                        args.patch_depth, train=False)
+                per_class = evaluate_3d(net, test_ds, device, args.patch_depth, norm)
+            else:
+                per_class = evaluate(net, test_loader, device, norm)
             test_scores[k] = float(per_class[1:].mean())
             scores |= {"test_dice": test_scores[k],
                        "test_dice_per_class": [float(x) for x in per_class]}
@@ -533,6 +560,12 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument('--normalize', action='store_true',
                         help="Z-score images with mean/std of each fold's training patients.")
 
+    #3D
+    parser.add_argument('--patch_depth', default=32, type=int,
+                        help="Consecutive slices per 3D training patch (multiple of 16).")
+    parser.add_argument('--samples_per_volume', default=8, type=int,
+                        help="Random 3D patches per training patient per epoch.")
+    
     # augmentation tuning (aug_tune.py)
     parser.add_argument('--aug_json', type=Path, default=None,
                         help="JSON with an AugConfig (best_aug.json from aug_tune.py).")
