@@ -1,10 +1,16 @@
-"""Configurable augmentation for 2D / 2.5D slices (used by aug_tune.py).
+"""Configurable augmentation for 2D / 2.5D slices (online: aug_tune.py, offline: offline_augment.py).
 
 Same operations as your augment_pair, but the strengths live in an AugConfig so
-Optuna can tune them. An Augmenter takes a LIST of images (1 for 2D, 2n+1 for 2.5D)
-and the centre ground truth. The same spatial transform is applied to every slice
+Optuna can tune them. An Augmenter works on a LIST of images (1 for 2D, 2n+1 for 2.5D)
+plus the centre ground truth. The same spatial transform is applied to every slice
 and to the gt, so the stack and the label stay aligned. A probability of 0 disables
 an augmentation.
+
+Sampling and application are separate steps:
+    params = aug.draw(rng)                    # which ops fire + their random values
+    imgs, gt = aug.apply(imgs, gt, params, rng)
+Calling aug(imgs, gt) does both (that is what the online dataset uses). The offline
+generator can draw ONCE per patient volume and apply it to all of its slices.
 
 Augmenter is a module-level class, so it can be pickled by DataLoader workers on Windows.
 """
@@ -52,28 +58,42 @@ class Augmenter:
     def __init__(self, cfg: AugConfig):
         self.cfg = cfg
 
-    def __call__(self, imgs, gt=None, rng=None):
-        rng = rng or np.random.default_rng()
+    def draw(self, rng):
+        """Decide which augmentations fire and draw their random values."""
         c = self.cfg
-        assert gt is None or imgs[0].size == gt.size
-
+        spatial = None
         if rng.random() < c.p_spatial:
-            angle = rng.uniform(-c.max_rotation_deg, c.max_rotation_deg)
-            tx = rng.uniform(-c.max_translation_px, c.max_translation_px)
-            ty = rng.uniform(-c.max_translation_px, c.max_translation_px)
-            scale = rng.uniform(1 - c.scale_delta, 1 + c.scale_delta)
+            spatial = (rng.uniform(-c.max_rotation_deg, c.max_rotation_deg),     # angle
+                       rng.uniform(-c.max_translation_px, c.max_translation_px),  # tx
+                       rng.uniform(-c.max_translation_px, c.max_translation_px),  # ty
+                       rng.uniform(1 - c.scale_delta, 1 + c.scale_delta))         # scale
+        shift = rng.uniform(-c.shift_max, c.shift_max) if rng.random() < c.p_shift else None
+        noise = bool(rng.random() < c.p_noise)
+        return {'spatial': spatial, 'shift': shift, 'noise': noise}
+
+    @staticmethod
+    def is_identity(params) -> bool:
+        return params['spatial'] is None and params['shift'] is None and not params['noise']
+
+    def apply(self, imgs, gt, params, rng):
+        """Apply drawn params. rng is only used for the per-pixel noise values."""
+        if params['spatial'] is not None:
+            angle, tx, ty, scale = params['spatial']
             coeffs = _affine_coeffs(imgs[0].size, angle, tx, ty, scale)
             imgs = [_apply_affine(i, coeffs, Image.BILINEAR, 0) for i in imgs]
             if gt is not None:
                 gt = _apply_affine(gt, coeffs, Image.NEAREST, 0)   # NEAREST keeps labels intact
 
-        if rng.random() < c.p_shift:
-            shift = rng.uniform(-c.shift_max, c.shift_max)         # one shift for the whole stack
-            imgs = [_to_img(np.asarray(i, dtype=np.float32) + shift) for i in imgs]
+        if params['shift'] is not None:                            # one shift for the whole stack
+            imgs = [_to_img(np.asarray(i, dtype=np.float32) + params['shift']) for i in imgs]
 
-        if rng.random() < c.p_noise:                               # independent noise per slice
+        if params['noise']:                                        # independent noise per slice
             imgs = [_to_img(np.asarray(i, dtype=np.float32)
-                            + rng.normal(0.0, c.noise_std, size=np.asarray(i).shape))
+                            + rng.normal(0.0, self.cfg.noise_std, size=np.asarray(i).shape))
                     for i in imgs]
-
         return imgs, gt
+
+    def __call__(self, imgs, gt=None, rng=None):
+        rng = rng or np.random.default_rng()
+        assert gt is None or imgs[0].size == gt.size
+        return self.apply(imgs, gt, self.draw(rng), rng)
