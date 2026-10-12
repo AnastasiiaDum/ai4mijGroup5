@@ -7,11 +7,8 @@ Steps:
   lcc -> keep the largest 3D connected component of each class, removed voxels become background. 
   fill_holes -> fill background holes enclosed inside a class.
   smooth -> Gaussian-smooth each class's one-hot mask and re-take the argmax.
-
-destination = results/final_UNET2D
-python postprocess.py --run_dir $destination --split val --steps lcc fill_holes smooth   # compare steps vs GT
-python postprocess.py --run_dir $destination --split heldout --steps lcc fill_holes      # final honest score
-python postprocess.py --run_dir $destination --split test --steps lcc fill_holes         # test set (no GT)
+  slice_lcc -> on each axial slice keep only the largest 2D blob of the chosen classes (default: esophagus).
+  z_smooth -> smooth along the slice direction only (sigma in mm).
 
 """
 
@@ -64,8 +61,11 @@ def bbox_slices(mask: np.ndarray, margin: int = 0):
     return tuple(slice(max(s.start - margin, 0), min(s.stop + margin, n)) for s, n in zip(objs[0], mask.shape))
 
 
-def keep_components(mask: np.ndarray, keep_frac: float) -> np.ndarray:
-    lab, n = ndimage.label(mask, structure=STRUCT_26)
+STRUCT_8 = ndimage.generate_binary_structure(2, 2)
+
+
+def keep_components(mask: np.ndarray, keep_frac: float, structure=STRUCT_26) -> np.ndarray:
+    lab, n = ndimage.label(mask, structure=structure)
     
     if n <= 1:
         return mask
@@ -118,28 +118,54 @@ def step_fill_holes(vol, spacing, p) -> None:
         view[holes] = c
 
 
-def step_smooth(vol, spacing, p) -> None:
-    sigma_vox = [p.smooth_sigma_mm / float(s) for s in spacing]
+def _smooth_labels(vol: np.ndarray, sigma_vox) -> None:
+    """ Gaussian-smooth every class mask (background included) and re-take the argmax, in place. """
     margin = int(np.ceil(3 * max(sigma_vox))) + 1
     box = bbox_slices(vol > 0, margin=margin)
-    
+
     if box is None:
         return
-    
+
     sub = vol[box]
     best = np.full(sub.shape, -1.0, dtype=np.float32)
     lab = np.zeros(sub.shape, dtype=np.uint8)
-    
+
     for c in range(K):
         g = ndimage.gaussian_filter((sub == c).astype(np.float32), sigma_vox, mode="nearest")
         upd = g > best
         best[upd] = g[upd]
         lab[upd] = c
-    
+
     vol[box] = lab
 
 
-STEPS = {"lcc": step_lcc, "fill_holes": step_fill_holes, "smooth": step_smooth}
+def step_smooth(vol, spacing, p) -> None:
+    """ Isotropic (in mm) smoothing of all classes. """
+    _smooth_labels(vol, [p.smooth_sigma_mm / float(s) for s in spacing])
+
+
+def step_z_smooth(vol, spacing, p) -> None:
+    """ Smoothing along the slice direction only: evens out slice-to-slice jitter of the
+    prediction without blurring in-plane detail. """
+    _smooth_labels(vol, [0.0, 0.0, p.zsmooth_sigma_mm / float(spacing[2])])
+
+
+def step_slice_lcc(vol, spacing, p) -> None:
+    """ On every axial slice keep only the largest 2D blob of the chosen classes (default:
+    esophagus). 3D 'lcc' cannot remove a speck that touches the organ in the neighbouring
+    slice; this can. Not meant for the aorta (ascending + descending aorta are two blobs on
+    some slices); for the trachea use --slice_keep_frac because it splits at the carina. """
+    for c in p.slice_lcc_classes:
+        mask = vol == c
+        for z in np.flatnonzero(mask.any(axis=(0, 1))):
+            m = mask[:, :, z]
+            removed = m & ~keep_components(m, p.slice_keep_frac, STRUCT_8)
+            if removed.any():
+                vol[:, :, z][removed] = 0
+
+
+STEPS = {"lcc": step_lcc, "fill_holes": step_fill_holes, "smooth": step_smooth,
+         "slice_lcc": step_slice_lcc, "z_smooth": step_z_smooth}
 
 
 # Metrics
@@ -177,6 +203,9 @@ def run(args) -> None:
     if args.patients:
         files = [f for f in files if f.name[:-7] in set(args.patients)]
     
+    if args.exclude:
+        files = [f for f in files if f.name[:-7] not in set(args.exclude)]
+
     if not files:
         raise FileNotFoundError(f"No .nii.gz predictions found in {args.pred_dir}")
     
@@ -280,11 +309,23 @@ def get_args() -> argparse.Namespace:
     p.add_argument("--fill_classes", type=int, nargs="+", default=[1, 2, 3, 4])
     p.add_argument("--fill_mode", choices=["3d", "2d"], default="3d")
     p.add_argument("--smooth_sigma_mm", type=float, default=1.0)
+    p.add_argument("--slice_lcc_classes", type=int, nargs="+", default=[1],
+                   help="slice_lcc: classes cleaned per axial slice (default: esophagus only).")
+    p.add_argument("--slice_keep_frac", type=float, default=0.0,
+                   help="slice_lcc: also keep 2D blobs >= this fraction of the largest on that slice (0 = largest only).")
+    p.add_argument("--zsmooth_sigma_mm", type=float, default=2.5,
+                   help="z_smooth: sigma along the slice direction in mm.")
     
+    p.add_argument("--exclude", nargs="+", default=None, help="Skip these patient ids.")
     a = p.parse_args()
-    
-    if a.split is not None and a.run_dir is None:
-        p.error("--split needs --run_dir")
+
+    if a.split is not None:
+        if a.run_dir is None:
+            p.error("--split needs --run_dir")
+        a.pred_dir = a.pred_dir or a.run_dir / f"{a.split}_pred"
+        a.out_dir = a.out_dir or a.run_dir / f"{a.split}_pp"
+        if a.split != "test" and a.gt_dir is None:
+            a.gt_dir = a.data_dir / "train"
 
     if a.pred_dir is None or a.out_dir is None:
         p.error("give --run_dir with --split, or --pred_dir and --out_dir")
