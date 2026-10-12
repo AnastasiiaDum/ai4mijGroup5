@@ -53,7 +53,11 @@ def build_arch(arch: str, n_neighbors: int) -> tuple[torch.nn.Module, list[int]]
 
 
 def load_net(args, device) -> tuple[torch.nn.Module, list[int]]:
-    net, offsets = build_arch(args.arch, args.n_neighbors)
+    if args.model_pkl is not None: 
+        net = torch.load(args.model_pkl, map_location=device, weights_only=False)
+        offsets = (list(range(-args.n_neighbors, args.n_neighbors + 1)) if "25d" in args.arch else [0])
+    else:
+        net, offsets = build_arch(args.arch, args.n_neighbors)  
 
     checkpoint = torch.load(args.weights, map_location=device, weights_only=False)
     if isinstance(checkpoint, torch.nn.Module): # bestmodel.pkl
@@ -180,7 +184,40 @@ def predict_volume(net, slices: np.ndarray, offsets: list[int], norm: dict | Non
     
     return out
 
+#add 3d predict volume 
+@torch.no_grad()
+def predict_volume_3d(net, slices: np.ndarray, norm: dict | None, device, batch_size: int,
+                      orig_xy: tuple[int, int], resampled_xy: tuple[int, int] | None,
+                      patch_depth: int) -> np.ndarray:
+    """Same sliding window along z as train_3D.predict_volume (50% overlap, averaged softmax)."""
+    vol = torch.from_numpy(slices).float().div_(255.0)          # (Z, H, W) in [0, 1]
+    Z = vol.shape[0]
+    if Z < patch_depth:                                         # pad short volumes (raw 0, as in training)
+        vol = F.pad(vol, (0, 0, 0, 0, 0, patch_depth - Z))
+    if norm is not None:                                        # same z-score as training
+        vol = (vol - norm["mean"]) / norm["std"]
+    x = vol[None, None].to(device)                              # (1, 1, Zp, H, W)
+    zp = x.shape[2]
+    stride = max(1, patch_depth // 2)                           # 50% overlap
+    starts = list(range(0, zp - patch_depth + 1, stride))
+    if starts[-1] != zp - patch_depth:                          # last window ends exactly at the last slice
+        starts.append(zp - patch_depth)
 
+    acc, count = None, torch.zeros((zp,), device=device)
+    for s in starts:
+        probs = F.softmax(net(x[:, :, s:s + patch_depth]), dim=1)[0]   # (K, D, H, W)
+        if acc is None:
+            acc = torch.zeros((probs.shape[0], zp, *probs.shape[-2:]), device=device)
+        acc[:, s:s + patch_depth] += probs
+        count[s:s + patch_depth] += 1
+    probs = (acc / count[None, :, None, None])[:, :Z].permute(1, 0, 2, 3)  # (Z, K, H, W), padding removed
+
+    out = np.zeros((*orig_xy, Z), dtype=np.uint8)
+    for start in range(0, Z, batch_size):                       # back to original space, slice by slice
+        labels = probs_to_original(probs[start:start + batch_size], orig_xy, resampled_xy)
+        out[:, :, start:start + labels.shape[0]] = labels.permute(1, 2, 0).numpy()
+    return out
+                          
 # Main
 def run(args) -> None:
     
@@ -217,8 +254,12 @@ def run(args) -> None:
         zooms = nii.header.get_zooms()
 
         slices, resampled_xy = preprocess(ct, zooms, args)
-        pred = predict_volume(net, slices, offsets, norm, device, args.batch_size,
-                              ct.shape[:2], resampled_xy)
+        if args.arch.endswith("3d"):
+            pred = predict_volume_3d(net, slices, norm, device, args.batch_size, 
+                                     ct.shape[:2], resampled_xy, args.patch_depth)
+        else:
+            pred = predict_volume(net, slices, offsets, norm, device, args.batch_size,
+                                  ct.shape[:2], resampled_xy)
 
         hdr = nii.header.copy()
         hdr.set_data_dtype(np.uint8)
@@ -257,7 +298,12 @@ def get_args() -> argparse.Namespace:
                    help="norm_stats.json from training with --normalize (auto-detected in --run_dir).")
 
     # Model must match the trained model
-    p.add_argument("--arch", default="unet2d", choices=["unet2d", "unet25d", "resunet2d", "resunet25d"])
+    p.add_argument("--arch", default="unet2d", 
+                   choices=["unet2d", "unet25d", "resunet2d", "resunet25d", "enet", "unet3d", "resunet3d"],
+                   help="enet / unet3d / resunet3d need --model_pkl.")
+    p.add_argument("--model_pkl", type=Path, default=None,
+                   help="Whole pickled model (bestmodel.pkl); --weights (state dict) is loaded on top if given.")
+    p.add_argument("--patch_depth", type=int, default=32, help="3D only: slices per window (as in training).")
     p.add_argument("--n_neighbors", type=int, default=2,
                    help="2.5D only: neighbours per side used at training (1 = 3 slices, 2 = 5 slices).")
 
@@ -294,7 +340,13 @@ def get_args() -> argparse.Namespace:
     
     if a.target_spacing is not None and a.target_spacing <= 0:
         a.target_spacing = None
-    
+    if a.arch in ("enet", "unet3d", "resunet3d") and a.model_pkl is None:
+        if a.run_dir is not None and (a.run_dir / "bestmodel.pkl").exists():
+            a.model_pkl = a.run_dir / "bestmodel.pkl"
+        else:
+            p.error(f"--arch {a.arch} needs --model_pkl")
+    if a.weights is None and a.model_pkl is not None:
+        a.weights = a.model_pkl
     missing = [n for n in ("input", "output", "weights") if getattr(a, n) is None]
     if missing:
         p.error("missing " + ", ".join("--" + m for m in missing) + " (or use --run_dir with --split)")
