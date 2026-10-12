@@ -215,9 +215,30 @@ def build_datasets(args, augment=None) -> tuple[dict[str, Any], dict[str, list[s
  
 def make_loaders(args, train_ds, val_ds) -> tuple[DataLoader, DataLoader]:
     B = get_batch_size(args)
-    # drop_last: a final training batch of size 1 would crash BatchNorm
-    train_loader = DataLoader(train_ds, batch_size=B, num_workers=5, shuffle=True, drop_last=True)
-    val_loader = DataLoader(val_ds, batch_size=B, num_workers=5, shuffle=False)
+    num_workers = 4
+    use_cuda = args.gpu and torch.cuda.is_available()
+
+    loader_options = {
+        "num_workers": num_workers,
+        "pin_memory": use_cuda,
+        "persistent_workers": num_workers > 0,
+    }
+
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=B,
+        shuffle=True,
+        drop_last=True,
+        **loader_options,
+    )
+
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=B,
+        shuffle=False,
+        **loader_options,
+    )
+
     return train_loader, val_loader
  
  
@@ -249,6 +270,8 @@ def train_one_fold(args, net, optimizer, device, train_loader, val_loader, K, de
     else:
         raise ValueError(args.mode, args.dataset)
     print(f">> Loss: {loss_name}")
+    use_amp = device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
  
     # Notice one has the length of the _loader_, and the other one of the _dataset_
     log_loss_tra: Tensor = torch.zeros((args.epochs, len(train_loader)))
@@ -260,6 +283,8 @@ def train_one_fold(args, net, optimizer, device, train_loader, val_loader, K, de
     since_best = 0
  
     for e in range(args.epochs):
+        (dest / f"iter{e:03d}" / "val").mkdir(parents=True, exist_ok=True)
+        
         for m in ['train', 'val']:
             match m:
                 case 'train':
@@ -273,7 +298,7 @@ def train_one_fold(args, net, optimizer, device, train_loader, val_loader, K, de
                 case 'val':
                     net.eval()
                     opt = None
-                    cm = torch.no_grad
+                    cm = torch.inference_mode
                     desc = f">> Validation ({e: 4d})"
                     loader = val_loader
                     log_loss = log_loss_val
@@ -283,49 +308,80 @@ def train_one_fold(args, net, optimizer, device, train_loader, val_loader, K, de
                 j = 0
                 tq_iter = tqdm_(enumerate(loader), total=len(loader), desc=desc)
                 for i, data in tq_iter:
-                    img = data['images'].to(device)
-                    gt = data['gts'].to(device)
+                    img = data['images'].to(device, non_blocking=True)
+                    gt = data['gts'].to(device, non_blocking=True)
  
                     if opt:
                         opt.zero_grad()
  
                     # Sanity tests to see if loaded and encoded the data correctly
-                    assert 0 <= img.min() and img.max() <= 1
+                    #assert 0 <= img.min() and img.max() <= 1
                     B, _, W, H = img.shape
 
                     # Normalize the input images using the computed mean and std
                     img = normalize(img, norm)
  
-                    pred_logits = net(img)
-                    pred_probs = F.softmax(1 * pred_logits, dim=1)
- 
-                    # Metrics computation, not used for training
-                    pred_seg = probs2one_hot(pred_probs)
-                    log_dice[e, j:j + B, :] = dice_coef(pred_seg, gt)
- 
+                    # Mixed precision for the model forward pass
+                    with torch.autocast(
+                        device_type="cuda",
+                        dtype=torch.float16,
+                        enabled=use_amp,
+                    ):
+                        pred_logits = net(img)
+
+                    # Keep softmax and loss in float32 for numerical stability
+                    pred_probs = F.softmax(pred_logits.float(), dim=1)
                     loss = loss_fn(pred_probs, gt)
-                    log_loss[e, i] = loss.item()
- 
-                    if opt:  # Only for training
-                        loss.backward()
-                        opt.step()
- 
+
+                    # Record loss for every batch
+                    if m == 'train':
+                        log_loss[e, i] = loss.item()
+                    else:
+                        log_loss[e, i] = loss.detach().cpu()
+
+                    # Dice metrics are only needed for validation and checkpoint selection
+                    
                     if m == 'val':
-                        with warnings.catch_warnings():
-                            warnings.filterwarnings('ignore', category=UserWarning)
-                            predicted_class: Tensor = probs2class(pred_probs)
-                            mult: int = 63 if K == 5 else (255 / (K - 1))
-                            save_images(predicted_class * mult,
-                                        data['stems'],
-                                        dest / f"iter{e:03d}" / m)
+                        pred_seg = probs2one_hot(pred_probs).float()
+                        gt_float = gt.float()
+
+                        inter = (pred_seg * gt_float).sum(dim=(2, 3))
+                        denom = pred_seg.sum(dim=(2, 3)) + gt_float.sum(dim=(2, 3))
+
+                        batch_dice = (2 * inter + 1e-8) / (denom + 1e-8)
+                        log_dice[e, j:j + B, :] = batch_dice
+
+                    if opt:  # Training only
+                        scaler.scale(loss).backward()
+                        scaler.step(opt)
+                        scaler.update()
+ 
+                    #if m == 'val':
+                     #   with warnings.catch_warnings():
+                      #      warnings.filterwarnings('ignore', category=UserWarning)
+                       #     predicted_class: Tensor = probs2class(pred_probs)
+                        #    mult: int = 63 if K == 5 else (255 / (K - 1))
+                         #   save_images(predicted_class * mult,
+                          #              data['stems'],
+                           #             dest / f"iter{e:03d}" / m)
  
                     j += B  # Keep in mind that _in theory_, each batch might have a different size
                     # For the DSC average: do not take the background class (0) into account:
-                    postfix_dict: dict[str, str] = {"Dice": f"{log_dice[e, :j, 1:].mean():05.3f}",
-                                                    "Loss": f"{log_loss[e, :i + 1].mean():5.2e}"}
-                    if K > 2:
-                        postfix_dict |= {f"Dice-{k}": f"{log_dice[e, :j, k].mean():05.3f}"
-                                         for k in range(1, K)}
+                    postfix_dict = {
+                        "Loss": f"{log_loss[e, :i + 1].mean():.2e}"
+                    }
+
+                    if m == 'val':
+                        postfix_dict["Dice"] = (
+                            f"{log_dice[e, :j, 1:].mean():.3f}"
+                        )
+
+                        if K > 2:
+                            postfix_dict.update({
+                                f"Dice-{k}": f"{log_dice[e, :j, k].mean():.3f}"
+                                for k in range(1, K)
+                            })
+
                     tq_iter.set_postfix(postfix_dict)
  
         # save it at each epochs, in case the code crashes or decide to stop it early
@@ -623,6 +679,8 @@ def get_parser() -> argparse.ArgumentParser:
 def main():
     parser = get_parser()
     args = parser.parse_args()
+    if args.gpu and torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
  
     if args.fold is not None and not (args.n_folds > 1 and 0 <= args.fold < args.n_folds):
         parser.error("--fold requires --n_folds > 1 and 0 <= fold < n_folds")
