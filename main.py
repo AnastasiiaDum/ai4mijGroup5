@@ -57,6 +57,7 @@ from losses import (CrossEntropy,
                     DiceCELoss)
 
 from UNet2_25D import UNet25D, UNet2D 
+from ResUNet2_25D import ResUNet25D, ResUNet2D
 from dataset import SliceDataset, SliceDataset25D
 from normalization import compute_stats, normalize
 
@@ -78,6 +79,7 @@ datasets_params: dict[str, dict[str, Any]] = {}
 #datasets_params["SEGTHOR_CLEAN"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
 # datasets_params["SEGTHOR"] = {'K': 5, 'net': UNet25D, 'B': 8, 'use_25d': True}
 datasets_params["SEGTHOR_UNET2D"] = {'K': 5, 'net': UNet2D, 'B': 8, 'plain_unet': True}
+datasets_params["SEGTHOR_RESUNET2D"] = {'K': 5, 'net': ResUNet2D, 'B': 4, 'plain_unet': True}
 # 3D models: plain_unet = built as net(1, K); use_3d = trained on 3D patches (train3d.py)
 datasets_params["SEGTHOR_UNET3D"]    = {'K': 5, 'net': UNet3D,    'B': 2, 'plain_unet': True, 'use_3d': True}
 datasets_params["SEGTHOR_RESUNET3D"] = {'K': 5, 'net': ResUNet3D, 'B': 2, 'plain_unet': True, 'use_3d': True}
