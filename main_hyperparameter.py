@@ -86,6 +86,8 @@ datasets_params["SEGTHOR_RESUNET25D"] = {'K': 5, 'net': ResUNet25D, 'B': 8, 'use
 # 3D models: plain_unet = built as net(1, K); use_3d = trained on 3D patches (train3d.py)
 datasets_params["SEGTHOR_UNET3D"]    = {'K': 5, 'net': UNet3D,    'B': 2, 'plain_unet': True, 'use_3d': True}
 datasets_params["SEGTHOR_RESUNET3D"] = {'K': 5, 'net': ResUNet3D, 'B': 2, 'plain_unet': True, 'use_3d': True}
+#readd original baseline to updated main file
+datasets_params["SEGTHOR_ENET"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}  
 
 def img_transform(img):
     img = img.convert('L')
